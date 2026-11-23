@@ -7,6 +7,7 @@
   <br>
 
   <img src="app/src/main/res/drawable/img_family_finance_logo.png" alt="Family Finance App Icon" width="110">
+  
   # Family Finance
 
   **Plan • Track • Grow Together**
