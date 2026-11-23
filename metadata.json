@@ -1,0 +1,6 @@
+{
+  "name": "Family Finance",
+  "description": "Plan • Track • Grow Together — Multi-family personal finance foundation with Firebase Firestore, Google Sign-In, local Room caching, and adaptive Material 3 navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,933 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile, account status metadata, and personal workspace preferences isolated to the owning user. Never contains passwords or passkey private keys.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "phoneNumber": { "type": "string" },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["ACTIVE", "PENDING_VERIFICATION", "LOCKED", "SUSPENDED"]
+        },
+        "passwordConfigured": { "type": "boolean" },
+        "passkeyCount": { "type": "integer" },
+        "newDeviceCheckEnabled": { "type": "boolean" },
+        "photoUrl": { "type": "string" },
+        "activeFamilyId": { "type": "string" },
+        "themePreference": {
+          "type": "string",
+          "enum": ["SYSTEM", "LIGHT", "DARK"]
+        },
+        "registeredAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "displayName", "email", "themePreference", "createdAt", "updatedAt"]
+    },
+    "PasskeyCredential": {
+      "title": "PasskeyCredential",
+      "description": "Public WebAuthn/FIDO2 passkey metadata written exclusively by trusted Cloud Functions. Never stores private keys.",
+      "type": "object",
+      "properties": {
+        "credentialId": { "type": "string" },
+        "userId": { "type": "string" },
+        "label": { "type": "string" },
+        "rpId": { "type": "string" },
+        "publicKeyBase64Url": { "type": "string" },
+        "counter": { "type": "integer" },
+        "backedUp": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastUsedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["credentialId", "userId", "label", "rpId", "publicKeyBase64Url", "counter", "createdAt", "lastUsedAt"]
+    },
+    "DeviceSession": {
+      "title": "DeviceSession",
+      "description": "Active or revoked device session entry under a user account supporting remote session revocation.",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "userId": { "type": "string" },
+        "deviceId": { "type": "string" },
+        "deviceLabel": { "type": "string" },
+        "platform": { "type": "string" },
+        "authMethod": {
+          "type": "string",
+          "enum": ["GOOGLE", "PHONE_OTP", "PHONE_PASSWORD", "PASSKEY"]
+        },
+        "isTrustedDevice": { "type": "boolean" },
+        "revoked": { "type": "boolean" },
+        "revokedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "lastActiveAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "userId", "deviceId", "deviceLabel", "platform", "authMethod", "isTrustedDevice", "revoked", "createdAt", "lastActiveAt"]
+    },
+    "Family": {
+      "title": "Family",
+      "description": "Isolated family financial workspace with unique random Family ID, permanent creator link, active Admin owner, and household settings.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "ownerId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "currencyCode": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "description": { "type": "string" },
+        "requireAdminApproval": { "type": "boolean" },
+        "memberChatEnabled": { "type": "boolean" },
+        "membersCanAddExpenses": { "type": "boolean" },
+        "budgetStartDay": { "type": "integer" },
+        "chatRetentionDays": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "name",
+        "ownerId",
+        "createdByUserId",
+        "currencyCode",
+        "memberUids",
+        "adminUids",
+        "requireAdminApproval",
+        "memberChatEnabled",
+        "membersCanAddExpenses",
+        "budgetStartDay",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FamilyMember": {
+      "title": "FamilyMember",
+      "description": "Member role and granular permissions record isolated to a family workspace.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "cardMemberId": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "MEMBER"] },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "relationLabel": { "type": "string" },
+        "canCreateRecords": { "type": "boolean" },
+        "canViewSharedFinances": { "type": "boolean" },
+        "canParticipateInChat": { "type": "boolean" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "familyId",
+        "displayName",
+        "role",
+        "memberUids",
+        "adminUids",
+        "canCreateRecords",
+        "canViewSharedFinances",
+        "canParticipateInChat",
+        "joinedAt",
+        "updatedAt"
+      ]
+    },
+    "FamilyInviteLookup": {
+      "title": "FamilyInviteLookup",
+      "description": "Non-listable SHA-256 token-hash lookup record gating join requests. Family ID alone never grants lookup.",
+      "type": "object",
+      "properties": {
+        "tokenHash": { "type": "string" },
+        "invitationId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "familyName": { "type": "string" },
+        "createdByUid": { "type": "string" },
+        "targetRole": { "type": "string", "enum": ["ADMIN", "MEMBER"] },
+        "inviteeHint": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "REVOKED", "USED"] },
+        "maxUses": { "type": "integer" },
+        "usedCount": { "type": "integer" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "tokenHash",
+        "invitationId",
+        "familyId",
+        "familyName",
+        "createdByUid",
+        "targetRole",
+        "status",
+        "maxUses",
+        "usedCount",
+        "expiresAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FamilyInvitation": {
+      "title": "FamilyInvitation",
+      "description": "Admin-scoped ledger of expiring invitation tokens for a family workspace.",
+      "type": "object",
+      "properties": {
+        "invitationId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "tokenHash": { "type": "string" },
+        "token": { "type": "string" },
+        "tokenPreview": { "type": "string" },
+        "targetRole": { "type": "string", "enum": ["ADMIN", "MEMBER"] },
+        "inviteeHint": { "type": "string" },
+        "status": { "type": "string", "enum": ["ACTIVE", "REVOKED", "USED"] },
+        "maxUses": { "type": "integer" },
+        "usedCount": { "type": "integer" },
+        "createdByUid": { "type": "string" },
+        "adminUids": { "type": "array" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "invitationId",
+        "familyId",
+        "tokenHash",
+        "tokenPreview",
+        "targetRole",
+        "status",
+        "maxUses",
+        "usedCount",
+        "createdByUid",
+        "expiresAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "FamilyJoinRequest": {
+      "title": "FamilyJoinRequest",
+      "description": "Pending membership request created with a valid expiring invitation token, awaiting Family Admin approval.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "contactSummary": { "type": "string" },
+        "relationLabel": { "type": "string" },
+        "invitationId": { "type": "string" },
+        "tokenHash": { "type": "string" },
+        "requestedRole": { "type": "string", "enum": ["ADMIN", "MEMBER"] },
+        "status": { "type": "string", "enum": ["PENDING_APPROVAL", "APPROVED", "REJECTED"] },
+        "reviewedByUid": { "type": "string" },
+        "requestedAt": { "type": "string", "format": "date-time" },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId",
+        "familyId",
+        "displayName",
+        "invitationId",
+        "tokenHash",
+        "requestedRole",
+        "status",
+        "requestedAt",
+        "updatedAt"
+      ]
+    },
+    "TransactionRecord": {
+      "title": "TransactionRecord",
+      "description": "Normalized income, expense, or transfer ledger entry isolated by familyId with idempotencyKey deduplication.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "transactionId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "memberId": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "SETTLED", "VOIDED", "PENDING_REVIEW"] },
+        "transactionType": { "type": "string", "enum": ["INCOME", "EXPENSE", "TRANSFER"] },
+        "paymentMethod": { "type": "string" },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "recurrenceFrequency": { "type": "string", "enum": ["NONE", "DAILY", "WEEKLY", "BIWEEKLY", "MONTHLY", "YEARLY"] },
+        "nextRecurrenceAt": { "type": "string", "format": "date-time" },
+        "recurringParentId": { "type": "string" },
+        "isRecurringTemplate": { "type": "boolean" },
+        "idempotencyKey": { "type": "string" },
+        "syncVersion": { "type": "integer" },
+        "deviceId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "recordId", "familyId", "createdByUserId", "amount", "currency",
+        "category", "description", "recordStatus", "transactionType",
+        "occurredAt", "idempotencyKey", "syncVersion", "memberUids",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "LoanRecord": {
+      "title": "LoanRecord",
+      "description": "Normalized household loan (borrowed or lent) record isolated by familyId with minor-unit precision and installment tracking.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountMinor": { "type": "integer" },
+        "remainingBalance": { "type": "number" },
+        "remainingBalanceMinor": { "type": "integer" },
+        "interestRateApr": { "type": "number" },
+        "currency": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "SETTLED", "VOIDED", "PENDING_REVIEW"] },
+        "loanDirection": { "type": "string", "enum": ["BORROWED", "LENT"] },
+        "counterparty": { "type": "string" },
+        "borrowerName": { "type": "string" },
+        "borrowerContact": { "type": "string" },
+        "lenderName": { "type": "string" },
+        "lenderContact": { "type": "string" },
+        "totalInstallments": { "type": "integer" },
+        "paidInstallments": { "type": "integer" },
+        "installmentAmountMinor": { "type": "integer" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "idempotencyKey": { "type": "string" },
+        "syncVersion": { "type": "integer" },
+        "deviceId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "recordId", "familyId", "createdByUserId", "amount", "remainingBalance",
+        "currency", "category", "description", "recordStatus", "loanDirection",
+        "counterparty", "idempotencyKey", "syncVersion", "memberUids",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "SavingsRecord": {
+      "title": "SavingsRecord",
+      "description": "Normalized household savings goal and progress record isolated by familyId.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountMinor": { "type": "integer" },
+        "targetAmount": { "type": "number" },
+        "targetAmountMinor": { "type": "integer" },
+        "currency": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "goalName": { "type": "string" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "SETTLED", "VOIDED", "PENDING_REVIEW"] },
+        "targetDate": { "type": "string", "format": "date-time" },
+        "idempotencyKey": { "type": "string" },
+        "syncVersion": { "type": "integer" },
+        "deviceId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "recordId", "familyId", "createdByUserId", "amount", "targetAmount",
+        "currency", "category", "description", "goalName", "recordStatus",
+        "idempotencyKey", "syncVersion", "memberUids", "createdAt", "updatedAt"
+      ]
+    },
+    "InvestmentRecord": {
+      "title": "InvestmentRecord",
+      "description": "Normalized household investment holding record isolated by familyId with separate principal vs valuation tracking.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountMinor": { "type": "integer" },
+        "currentValue": { "type": "number" },
+        "currentValueMinor": { "type": "integer" },
+        "units": { "type": "number" },
+        "currency": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "assetName": { "type": "string" },
+        "assetType": { "type": "string", "enum": ["STOCK", "ETF", "MUTUAL_FUND", "BOND", "REAL_ESTATE", "CRYPTO", "OTHER"] },
+        "symbol": { "type": "string" },
+        "investedAt": { "type": "string", "format": "date-time" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "SETTLED", "VOIDED", "PENDING_REVIEW"] },
+        "idempotencyKey": { "type": "string" },
+        "syncVersion": { "type": "integer" },
+        "deviceId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "recordId", "familyId", "createdByUserId", "amount", "currentValue",
+        "currency", "category", "description", "assetName", "assetType",
+        "recordStatus", "idempotencyKey", "syncVersion", "memberUids",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "BudgetRecord": {
+      "title": "BudgetRecord",
+      "description": "Normalized monthly or category budget envelope isolated by familyId.",
+      "type": "object",
+      "properties": {
+        "recordId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "amount": { "type": "number" },
+        "amountMinor": { "type": "integer" },
+        "spentAmount": { "type": "number" },
+        "spentAmountMinor": { "type": "integer" },
+        "alertThresholdPercent": { "type": "integer" },
+        "budgetScope": { "type": "string", "enum": ["MONTHLY_OVERALL", "CATEGORY"] },
+        "currency": { "type": "string" },
+        "category": { "type": "string" },
+        "description": { "type": "string" },
+        "periodKey": { "type": "string" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "SETTLED", "VOIDED", "PENDING_REVIEW"] },
+        "idempotencyKey": { "type": "string" },
+        "syncVersion": { "type": "integer" },
+        "deviceId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "recordId", "familyId", "createdByUserId", "amount", "spentAmount",
+        "currency", "category", "description", "periodKey", "recordStatus",
+        "idempotencyKey", "syncVersion", "memberUids", "createdAt", "updatedAt"
+      ]
+    },
+    "FinancialEvent": {
+      "title": "FinancialEvent",
+      "description": "Append-only financial history event for loan installments, savings deposits/withdrawals, investment performance updates, and budget alerts.",
+      "type": "object",
+      "properties": {
+        "eventId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "parentRecordId": { "type": "string" },
+        "moduleType": { "type": "string", "enum": ["LOANS", "SAVINGS", "INVESTMENTS", "BUDGETS"] },
+        "eventType": { "type": "string" },
+        "actorUserId": { "type": "string" },
+        "amountMinor": { "type": "integer" },
+        "secondaryAmountMinor": { "type": "integer" },
+        "balanceAfterMinor": { "type": "integer" },
+        "currency": { "type": "string" },
+        "note": { "type": "string" },
+        "eventDate": { "type": "string", "format": "date-time" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "eventId", "familyId", "parentRecordId", "moduleType", "eventType",
+        "actorUserId", "amountMinor", "currency", "eventDate", "memberUids", "createdAt"
+      ]
+    },
+    "FamilyChatMessage": {
+      "title": "FamilyChatMessage",
+      "description": "Family-scoped chat message for household coordination with read receipts, editing, soft deletion, and retention metadata.",
+      "type": "object",
+      "properties": {
+        "messageId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "senderUserId": { "type": "string" },
+        "senderDisplayName": { "type": "string" },
+        "senderPhotoUrl": { "type": "string" },
+        "senderRoleLabel": { "type": "string" },
+        "messageText": { "type": "string" },
+        "messageType": { "type": "string", "enum": ["TEXT", "SYSTEM", "RECORD_REF"] },
+        "relatedRecordId": { "type": "string" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED", "VOIDED"] },
+        "readByUids": { "type": "array" },
+        "editedAt": { "type": "string", "format": "date-time" },
+        "deletedAt": { "type": "string", "format": "date-time" },
+        "deletedByUserId": { "type": "string" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "syncVersion": { "type": "integer" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "messageId", "familyId", "senderUserId", "senderDisplayName",
+        "messageText", "messageType", "recordStatus", "memberUids",
+        "createdAt", "updatedAt"
+      ]
+    },
+    "FamilyNotification": {
+      "title": "FamilyNotification",
+      "description": "Targeted or household-wide alert isolated by familyId and recipientUserId with per-user read tracking.",
+      "type": "object",
+      "properties": {
+        "notificationId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "recipientUserId": { "type": "string" },
+        "createdByUserId": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "notificationType": { "type": "string" },
+        "relatedRecordId": { "type": "string" },
+        "deepLinkModule": { "type": "string" },
+        "acknowledged": { "type": "boolean" },
+        "readByUids": { "type": "array" },
+        "recordStatus": { "type": "string", "enum": ["ACTIVE", "ARCHIVED"] },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "notificationId", "familyId", "recipientUserId", "createdByUserId",
+        "title", "body", "notificationType", "acknowledged", "recordStatus",
+        "memberUids", "createdAt", "updatedAt"
+      ]
+    },
+    "FcmDeviceToken": {
+      "title": "FcmDeviceToken",
+      "description": "Firebase Cloud Messaging device registration token scoped to a signed-in user.",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string" },
+        "token": { "type": "string" },
+        "platform": { "type": "string" },
+        "notificationsEnabled": { "type": "boolean" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["deviceId", "token", "platform", "updatedAt"]
+    },
+    "AuditLogEntry": {
+      "title": "AuditLogEntry",
+      "description": "Append-only immutable audit trail entry for financial mutations, sync events, and membership governance.",
+      "type": "object",
+      "properties": {
+        "auditId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "actorUserId": { "type": "string" },
+        "entityCollection": { "type": "string" },
+        "entityId": { "type": "string" },
+        "action": { "type": "string", "enum": ["CREATE", "UPDATE", "DELETE", "ARCHIVE", "STATUS_CHANGE", "MEMBER_CHANGE", "SYNC"] },
+        "summary": { "type": "string" },
+        "afterHash": { "type": "string" },
+        "deviceId": { "type": "string" },
+        "memberUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "auditId", "familyId", "actorUserId", "entityCollection",
+        "entityId", "action", "summary", "memberUids", "createdAt"
+      ]
+    },
+    "CallSession": {
+      "title": "CallSession",
+      "description": "1-to-1 WebRTC peer-to-peer audio/video call signaling and persistent call log entry scoped to the two family participants.",
+      "type": "object",
+      "properties": {
+        "callId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "callerUid": { "type": "string" },
+        "calleeUid": { "type": "string" },
+        "callerName": { "type": "string" },
+        "calleeName": { "type": "string" },
+        "participantUids": { "type": "array" },
+        "mediaType": { "type": "string", "enum": ["AUDIO", "VIDEO"] },
+        "status": { "type": "string", "enum": ["RINGING", "CONNECTING", "ACTIVE", "ENDED", "REJECTED", "MISSED", "CANCELLED"] },
+        "offerSdp": { "type": "string" },
+        "offerType": { "type": "string" },
+        "answerSdp": { "type": "string" },
+        "answerType": { "type": "string" },
+        "iceRestartCount": { "type": "integer" },
+        "networkQuality": { "type": "string", "enum": ["UNKNOWN", "EXCELLENT", "GOOD", "FAIR", "POOR"] },
+        "durationSeconds": { "type": "integer" },
+        "endedByUid": { "type": "string" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "callId", "familyId", "callerUid", "calleeUid", "callerName", "calleeName",
+        "participantUids", "mediaType", "status", "createdAt", "updatedAt"
+      ]
+    },
+    "IceCandidateEntry": {
+      "title": "IceCandidateEntry",
+      "description": "WebRTC trickle ICE candidate exchanged strictly between call participants.",
+      "type": "object",
+      "properties": {
+        "candidateId": { "type": "string" },
+        "callId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "senderUid": { "type": "string" },
+        "role": { "type": "string", "enum": ["CALLER", "CALLEE"] },
+        "sdpMid": { "type": "string" },
+        "sdpMLineIndex": { "type": "integer" },
+        "candidate": { "type": "string" },
+        "participantUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "candidateId", "callId", "familyId", "senderUid", "role",
+        "sdpMLineIndex", "candidate", "participantUids", "createdAt"
+      ]
+    },
+    "FamilyMeeting": {
+      "title": "FamilyMeeting",
+      "description": "Group audio/video meeting metadata backed by LiveKit SFU and isolated by familyId.",
+      "type": "object",
+      "properties": {
+        "meetingId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "roomName": { "type": "string" },
+        "title": { "type": "string" },
+        "hostUid": { "type": "string" },
+        "hostName": { "type": "string" },
+        "inviteCode": { "type": "string" },
+        "inviteLink": { "type": "string" },
+        "status": { "type": "string", "enum": ["SCHEDULED", "LIVE", "ENDED", "CANCELLED"] },
+        "isScheduled": { "type": "boolean" },
+        "scheduledFor": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "endedAt": { "type": "string", "format": "date-time" },
+        "endedByUid": { "type": "string" },
+        "audioEnabledDefault": { "type": "boolean" },
+        "videoEnabledDefault": { "type": "boolean" },
+        "invitedUids": { "type": "array" },
+        "activeParticipantUids": { "type": "array" },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "meetingId", "familyId", "roomName", "title", "hostUid", "hostName",
+        "inviteCode", "inviteLink", "status", "isScheduled", "audioEnabledDefault",
+        "videoEnabledDefault", "memberUids", "createdAt", "updatedAt"
+      ]
+    },
+    "MeetingParticipant": {
+      "title": "MeetingParticipant",
+      "description": "Real-time participant roster, media mute state, and host moderation status inside a family meeting.",
+      "type": "object",
+      "properties": {
+        "participantUid": { "type": "string" },
+        "meetingId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "displayName": { "type": "string" },
+        "roleLabel": { "type": "string" },
+        "isHost": { "type": "boolean" },
+        "state": { "type": "string", "enum": ["INVITED", "JOINED", "LEFT", "REMOVED"] },
+        "audioEnabled": { "type": "boolean" },
+        "videoEnabled": { "type": "boolean" },
+        "screenSharing": { "type": "boolean" },
+        "mutedByHost": { "type": "boolean" },
+        "removedByHost": { "type": "boolean" },
+        "memberUids": { "type": "array" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "leftAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "participantUid", "meetingId", "familyId", "displayName", "isHost", "state",
+        "audioEnabled", "videoEnabled", "screenSharing", "mutedByHost", "removedByHost",
+        "memberUids", "updatedAt"
+      ]
+    },
+    "MemberCard": {
+      "title": "MemberCard",
+      "description": "Digital Member Card and configurable financial privacy preferences for a family member. Uses a 16-char alphanumeric cardMemberId and omits private phone/DOB/password fields.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "cardMemberId": { "type": "string" },
+        "familyName": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "role": { "type": "string", "enum": ["ADMIN", "MEMBER"] },
+        "memberStatus": { "type": "string", "enum": ["ACTIVE", "SUSPENDED"] },
+        "memberUids": { "type": "array" },
+        "adminUids": { "type": "array" },
+        "showAvailableBalance": { "type": "boolean" },
+        "showIncomeAndExpense": { "type": "boolean" },
+        "showFamilyContributions": { "type": "boolean" },
+        "showLoans": { "type": "boolean" },
+        "showSavings": { "type": "boolean" },
+        "showInvestments": { "type": "boolean" },
+        "showTransactionHistory": { "type": "boolean" },
+        "allowAdminDetailedAudit": { "type": "boolean" },
+        "joinedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "userId", "familyId", "cardMemberId", "familyName", "displayName",
+        "role", "memberStatus", "showAvailableBalance", "showIncomeAndExpense",
+        "showFamilyContributions", "showLoans", "showSavings", "showInvestments",
+        "showTransactionHistory", "allowAdminDetailedAudit", "joinedAt", "updatedAt"
+      ]
+    },
+    "ApprovalSettings": {
+      "title": "ApprovalSettings",
+      "description": "Family-configurable governance rules for financial proposals and voting.",
+      "type": "object",
+      "properties": {
+        "configId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "ruleMode": { "type": "string", "enum": ["MAJORITY", "UNANIMOUS", "MIN_PERCENTAGE"] },
+        "minApprovalPercent": { "type": "integer" },
+        "minQuorumCount": { "type": "integer" },
+        "defaultDeadlineHours": { "type": "integer" },
+        "allowCreatorVote": { "type": "boolean" },
+        "allowVoteChangeBeforeDeadline": { "type": "boolean" },
+        "eligibleVoterRule": {
+          "type": "string",
+          "enum": ["ALL_ACTIVE_MEMBERS", "RECORDS_AUTHORIZED_MEMBERS", "ADMINS_ONLY", "SPECIFIC_MEMBERS"]
+        },
+        "specificEligibleUids": { "type": "array", "items": { "type": "string" } },
+        "requiredCategories": { "type": "array", "items": { "type": "string" } },
+        "largeExpenseThresholdMinor": { "type": "integer" },
+        "updatedByUid": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "configId", "familyId", "ruleMode", "minApprovalPercent", "minQuorumCount",
+        "defaultDeadlineHours", "allowCreatorVote", "allowVoteChangeBeforeDeadline",
+        "eligibleVoterRule", "updatedByUid", "updatedAt"
+      ]
+    },
+    "FamilyProposal": {
+      "title": "FamilyProposal",
+      "description": "Financial decision proposal requiring structured family approval before execution.",
+      "type": "object",
+      "properties": {
+        "proposalId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "title": { "type": "string" },
+        "category": {
+          "type": "string",
+          "enum": [
+            "TAKE_LOAN", "GIVE_LOAN", "MAKE_INVESTMENT", "WITHDRAW_SAVINGS",
+            "LARGE_EXPENSE", "LARGE_PURCHASE", "OTHER_CONFIGURABLE"
+          ]
+        },
+        "description": { "type": "string" },
+        "reason": { "type": "string" },
+        "amountMinor": { "type": "integer" },
+        "currency": { "type": "string" },
+        "relatedParty": { "type": "string" },
+        "supportingDocName": { "type": "string" },
+        "supportingDocUri": { "type": "string" },
+        "targetSavingsId": { "type": "string" },
+        "proposedDate": { "type": "string", "format": "date-time" },
+        "votingDeadline": { "type": "string", "format": "date-time" },
+        "proposerUid": { "type": "string" },
+        "proposerName": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["DRAFT", "PENDING", "APPROVED", "REJECTED", "EXPIRED", "CANCELLED", "EXECUTED"]
+        },
+        "ruleMode": { "type": "string", "enum": ["MAJORITY", "UNANIMOUS", "MIN_PERCENTAGE"] },
+        "minApprovalPercent": { "type": "integer" },
+        "minQuorumRequired": { "type": "integer" },
+        "allowCreatorVote": { "type": "boolean" },
+        "allowVoteChangeBeforeDeadline": { "type": "boolean" },
+        "eligibleVoterRule": { "type": "string" },
+        "eligibleVoterUids": { "type": "array", "items": { "type": "string" } },
+        "approvedCount": { "type": "integer" },
+        "rejectedCount": { "type": "integer" },
+        "finalDecision": { "type": "string" },
+        "cancelReason": { "type": "string" },
+        "cancelledByUid": { "type": "string" },
+        "executedRecordId": { "type": "string" },
+        "executedCollection": { "type": "string" },
+        "executedByUid": { "type": "string" },
+        "executedAt": { "type": "string", "format": "date-time" },
+        "decidedAt": { "type": "string", "format": "date-time" },
+        "memberUids": { "type": "array", "items": { "type": "string" } },
+        "adminUids": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "proposalId", "familyId", "title", "category", "amountMinor", "currency",
+        "proposedDate", "votingDeadline", "proposerUid", "status", "ruleMode",
+        "minApprovalPercent", "minQuorumRequired", "allowCreatorVote",
+        "allowVoteChangeBeforeDeadline", "eligibleVoterUids", "approvedCount",
+        "rejectedCount", "memberUids", "createdAt", "updatedAt"
+      ]
+    },
+    "ProposalVote": {
+      "title": "ProposalVote",
+      "description": "Single vote document keyed by voterUid under proposals/{proposalId}/votes.",
+      "type": "object",
+      "properties": {
+        "voterUid": { "type": "string" },
+        "voterName": { "type": "string" },
+        "proposalId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "choice": { "type": "string", "enum": ["APPROVE", "REJECT"] },
+        "comment": { "type": "string" },
+        "memberUids": { "type": "array", "items": { "type": "string" } },
+        "votedAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["voterUid", "voterName", "proposalId", "familyId", "choice", "memberUids", "votedAt", "updatedAt"]
+    },
+    "ProposalVoteHistory": {
+      "title": "ProposalVoteHistory",
+      "description": "Immutable append-only voting and decision audit history entry.",
+      "type": "object",
+      "properties": {
+        "historyId": { "type": "string" },
+        "proposalId": { "type": "string" },
+        "familyId": { "type": "string" },
+        "actorUid": { "type": "string" },
+        "actorName": { "type": "string" },
+        "actionType": { "type": "string" },
+        "previousChoice": { "type": "string" },
+        "newChoice": { "type": "string" },
+        "note": { "type": "string" },
+        "memberUids": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["historyId", "proposalId", "familyId", "actorUid", "actionType", "memberUids", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile and account security metadata scoped strictly to the owning UID."
+    },
+    "/users/{userId}/passkeys/{credentialId}": {
+      "schema": { "$ref": "#/entities/PasskeyCredential" },
+      "description": "Public WebAuthn/FIDO2 passkey metadata written server-side; owner-readable and revocable."
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/DeviceSession" },
+      "description": "Device session tracking and remote session revocation ledger per user."
+    },
+    "/users/{userId}/fcm_tokens/{deviceId}": {
+      "schema": { "$ref": "#/entities/FcmDeviceToken" },
+      "description": "FCM push notification registration tokens scoped strictly to the owning UID."
+    },
+    "/family_invites/{tokenHash}": {
+      "schema": { "$ref": "#/entities/FamilyInviteLookup" },
+      "description": "Non-listable SHA-256 token lookup enforcing valid expiring invitation tokens."
+    },
+    "/families/{familyId}": {
+      "schema": { "$ref": "#/entities/Family" },
+      "description": "Isolated family workspaces accessible only to authorized family members."
+    },
+    "/families/{familyId}/members/{memberId}": {
+      "schema": { "$ref": "#/entities/FamilyMember" },
+      "description": "Family member records scoped under each isolated family."
+    },
+    "/families/{familyId}/member_cards/{userId}": {
+      "schema": { "$ref": "#/entities/MemberCard" },
+      "description": "Digital Member Card & privacy preferences scoped per family member without exposing DOB, mobile number, or passwords."
+    },
+    "/families/{familyId}/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/FamilyInvitation" },
+      "description": "Expiring invitation ledger accessible only to Family Admins."
+    },
+    "/families/{familyId}/join_requests/{requesterUid}": {
+      "schema": { "$ref": "#/entities/FamilyJoinRequest" },
+      "description": "Token-backed join requests awaiting explicit Family Admin approval."
+    },
+    "/familyMembers/{membershipId}": {
+      "schema": { "$ref": "#/entities/FamilyMember" },
+      "description": "Normalized top-level family member directory scoped by familyId and memberUids."
+    },
+    "/invitations/{invitationId}": {
+      "schema": { "$ref": "#/entities/FamilyInvitation" },
+      "description": "Normalized top-level invitation directory scoped to Family Admins."
+    },
+    "/transactions/{recordId}": {
+      "schema": { "$ref": "#/entities/TransactionRecord" },
+      "description": "Normalized income, expense, and transfer records isolated by familyId."
+    },
+    "/loans/{recordId}": {
+      "schema": { "$ref": "#/entities/LoanRecord" },
+      "description": "Normalized household loan records isolated by familyId."
+    },
+    "/savings/{recordId}": {
+      "schema": { "$ref": "#/entities/SavingsRecord" },
+      "description": "Normalized household savings goal records isolated by familyId."
+    },
+    "/investments/{recordId}": {
+      "schema": { "$ref": "#/entities/InvestmentRecord" },
+      "description": "Normalized household investment holdings isolated by familyId."
+    },
+    "/budgets/{recordId}": {
+      "schema": { "$ref": "#/entities/BudgetRecord" },
+      "description": "Normalized period budget envelopes isolated by familyId."
+    },
+    "/chats/{messageId}": {
+      "schema": { "$ref": "#/entities/FamilyChatMessage" },
+      "description": "Normalized family chat messages isolated by familyId."
+    },
+    "/notifications/{notificationId}": {
+      "schema": { "$ref": "#/entities/FamilyNotification" },
+      "description": "Normalized household notifications isolated by familyId and recipientUserId."
+    },
+    "/auditLogs/{auditId}": {
+      "schema": { "$ref": "#/entities/AuditLogEntry" },
+      "description": "Append-only immutable audit log collection isolated by familyId."
+    },
+    "/financialEvents/{eventId}": {
+      "schema": { "$ref": "#/entities/FinancialEvent" },
+      "description": "Append-only chronological history for loans, savings, investments, and budgets."
+    },
+    "/calls/{callId}": {
+      "schema": { "$ref": "#/entities/CallSession" },
+      "description": "1-to-1 WebRTC signaling and call history restricted strictly to caller and callee within the family."
+    },
+    "/calls/{callId}/iceCandidates/{candidateId}": {
+      "schema": { "$ref": "#/entities/IceCandidateEntry" },
+      "description": "WebRTC ICE candidates restricted strictly to the parent call participants."
+    },
+    "/meetings/{meetingId}": {
+      "schema": { "$ref": "#/entities/FamilyMeeting" },
+      "description": "LiveKit SFU group meetings and scheduled sessions isolated by familyId."
+    },
+    "/families/{familyId}/approval_settings/{configId}": {
+      "schema": { "$ref": "#/entities/ApprovalSettings" },
+      "description": "Admin-configurable family voting and proposal rules isolated per family."
+    },
+    "/meetings/{meetingId}/participants/{participantUid}": {
+      "schema": { "$ref": "#/entities/MeetingParticipant" },
+      "description": "Per-participant meeting state and host moderation flags within a family meeting."
+    },
+    "/proposals/{proposalId}": {
+      "schema": { "$ref": "#/entities/FamilyProposal" },
+      "description": "Financial decision proposals isolated by familyId with anti-tamper state transitions."
+    },
+    "/proposals/{proposalId}/votes/{voterUid}": {
+      "schema": { "$ref": "#/entities/ProposalVote" },
+      "description": "One vote per eligible voter keyed by voterUid."
+    },
+    "/proposals/{proposalId}/vote_history/{historyId}": {
+      "schema": { "$ref": "#/entities/ProposalVoteHistory" },
+      "description": "Append-only immutable voting audit log per proposal."
+    }
+  }
+}

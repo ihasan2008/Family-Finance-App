@@ -1,0 +1,15 @@
+[
+  {
+    "relation": [
+      "delegate_permission/common.handle_all_urls",
+      "delegate_permission/common.get_login_creds"
+    ],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "com.aistudio.familyfinance.kxmpzq",
+      "sha256_cert_fingerprints": [
+        "7E:D3:09:9B:FD:3F:01:9B:97:53:64:5C:33:B6:A4:AD:8D:B5:08:41:C7:B6:12:AA:A6:C3:66:B4:F2:7A:B7:8F"
+      ]
+    }
+  }
+]

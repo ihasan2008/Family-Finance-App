@@ -1,0 +1,1723 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net (also blocks server-only collections such as
+    // auth_credentials, phone_index, auth_rate_limits, webauthn_challenges, and trusted_devices)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Security Primitives ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isPersonalWorkspace(familyId) {
+      return isSignedIn() && familyId == ('personal_' + request.auth.uid);
+    }
+
+    function isFamilyMember(familyId) {
+      return isSignedIn() &&
+             isValidId(familyId) &&
+             (
+               isPersonalWorkspace(familyId) ||
+               (
+                 exists(/databases/$(database)/documents/families/$(familyId)) &&
+                 request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.memberUids &&
+                 (
+                   !('suspendedUids' in get(/databases/$(database)/documents/families/$(familyId)).data) ||
+                   !(request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.suspendedUids)
+                 )
+               )
+             );
+    }
+
+    function isFamilyAdmin(familyId) {
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/families/$(familyId)) &&
+             (
+               request.auth.uid == get(/databases/$(database)/documents/families/$(familyId)).data.ownerId ||
+               request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.adminUids
+             );
+    }
+
+    function isFamilyAdminAfter(familyId) {
+      return isSignedIn() &&
+             existsAfter(/databases/$(database)/documents/families/$(familyId)) &&
+             (
+               request.auth.uid == getAfter(/databases/$(database)/documents/families/$(familyId)).data.ownerId ||
+               request.auth.uid in getAfter(/databases/$(database)/documents/families/$(familyId)).data.adminUids
+             );
+    }
+
+    function canMemberCreateFinancialRecord(familyId) {
+      return isPersonalWorkspace(familyId) ||
+             (
+               isFamilyMember(familyId) &&
+               (
+                 isFamilyAdmin(familyId) ||
+                 (
+                   get(/databases/$(database)/documents/families/$(familyId)).data.membersCanAddExpenses == true &&
+                   (
+                     !exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) ||
+                     get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.canCreateRecords == true
+                   )
+                 )
+               )
+             );
+    }
+
+    function canMemberParticipateInChat(familyId) {
+      return isFamilyMember(familyId) &&
+             (
+               isFamilyAdmin(familyId) ||
+               (
+                 get(/databases/$(database)/documents/families/$(familyId)).data.memberChatEnabled == true &&
+                 (
+                   !exists(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)) ||
+                   get(/databases/$(database)/documents/families/$(familyId)/members/$(request.auth.uid)).data.canParticipateInChat == true
+                 )
+               )
+             );
+    }
+
+    function isValidFinancialCore(data, docId) {
+      return data.recordId is string && data.recordId == docId && isValidId(data.recordId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.createdByUserId is string && isValidId(data.createdByUserId) &&
+             data.amount is number && data.amount >= 0 && data.amount <= 1000000000 &&
+             data.currency is string && data.currency.size() >= 3 && data.currency.size() <= 6 &&
+             data.category is string && data.category.size() >= 1 && data.category.size() <= 60 &&
+             data.description is string && data.description.size() <= 300 &&
+             data.recordStatus in ['ACTIVE', 'ARCHIVED', 'SETTLED', 'VOIDED', 'PENDING_REVIEW'] &&
+             data.idempotencyKey is string && data.idempotencyKey.size() >= 8 && data.idempotencyKey.size() <= 128 &&
+             data.syncVersion is int && data.syncVersion >= 1 &&
+             (!('deviceId' in data) || (data.deviceId is string && data.deviceId.size() <= 128)) &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             (!('adminUids' in data) || (data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTransactionRecord(data, docId) {
+      return isValidFinancialCore(data, docId) &&
+             data.transactionType in ['INCOME', 'EXPENSE', 'TRANSFER'] &&
+             data.occurredAt is timestamp && data.occurredAt <= request.time &&
+             (!('paymentMethod' in data) || (data.paymentMethod is string && data.paymentMethod.size() <= 40)) &&
+             (!('transactionId' in data) || (data.transactionId is string && data.transactionId == docId)) &&
+             (!('memberId' in data) || (data.memberId is string && isValidId(data.memberId))) &&
+             (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0 && data.amountMinor <= 100000000000)) &&
+             (!('recurrenceFrequency' in data) || data.recurrenceFrequency in ['NONE', 'DAILY', 'WEEKLY', 'BIWEEKLY', 'MONTHLY', 'YEARLY']) &&
+             (!('nextRecurrenceAt' in data) || data.nextRecurrenceAt is timestamp) &&
+             (!('recurringParentId' in data) || (data.recurringParentId is string && isValidId(data.recurringParentId))) &&
+             (!('isRecurringTemplate' in data) || data.isRecurringTemplate is bool);
+    }
+
+    function isValidLoanRecord(data, docId) {
+      return isValidFinancialCore(data, docId) &&
+             data.loanDirection in ['BORROWED', 'LENT'] &&
+             data.counterparty is string && data.counterparty.size() >= 1 && data.counterparty.size() <= 80 &&
+             data.remainingBalance is number && data.remainingBalance >= 0 && data.remainingBalance <= data.amount &&
+             (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0 && data.amountMinor <= 100000000000)) &&
+             (!('remainingBalanceMinor' in data) || (data.remainingBalanceMinor is int && data.remainingBalanceMinor >= 0 && (!('amountMinor' in data) || data.remainingBalanceMinor <= data.amountMinor))) &&
+             (!('interestRateApr' in data) || (data.interestRateApr is number && data.interestRateApr >= 0 && data.interestRateApr <= 200)) &&
+             (!('borrowerName' in data) || (data.borrowerName is string && data.borrowerName.size() <= 80)) &&
+             (!('borrowerContact' in data) || (data.borrowerContact is string && data.borrowerContact.size() <= 120)) &&
+             (!('lenderName' in data) || (data.lenderName is string && data.lenderName.size() <= 80)) &&
+             (!('lenderContact' in data) || (data.lenderContact is string && data.lenderContact.size() <= 120)) &&
+             (!('totalInstallments' in data) || (data.totalInstallments is int && data.totalInstallments >= 1 && data.totalInstallments <= 600)) &&
+             (!('paidInstallments' in data) || (data.paidInstallments is int && data.paidInstallments >= 0 && data.paidInstallments <= 600)) &&
+             (!('installmentAmountMinor' in data) || (data.installmentAmountMinor is int && data.installmentAmountMinor >= 0 && data.installmentAmountMinor <= 100000000000)) &&
+             (!('startDate' in data) || data.startDate is timestamp) &&
+             (!('dueDate' in data) || data.dueDate is timestamp);
+    }
+
+    function isValidSavingsRecord(data, docId) {
+      return isValidFinancialCore(data, docId) &&
+             data.goalName is string && data.goalName.size() >= 1 && data.goalName.size() <= 80 &&
+             data.targetAmount is number && data.targetAmount > 0 && data.targetAmount <= 1000000000 &&
+             (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0 && data.amountMinor <= 100000000000)) &&
+             (!('targetAmountMinor' in data) || (data.targetAmountMinor is int && data.targetAmountMinor > 0 && data.targetAmountMinor <= 100000000000)) &&
+             (!('targetDate' in data) || data.targetDate is timestamp);
+    }
+
+    function isValidInvestmentRecord(data, docId) {
+      return isValidFinancialCore(data, docId) &&
+             data.assetName is string && data.assetName.size() >= 1 && data.assetName.size() <= 80 &&
+             data.assetType in ['STOCK', 'ETF', 'MUTUAL_FUND', 'BOND', 'REAL_ESTATE', 'CRYPTO', 'OTHER'] &&
+             data.currentValue is number && data.currentValue >= 0 && data.currentValue <= 1000000000 &&
+             (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor >= 0 && data.amountMinor <= 100000000000)) &&
+             (!('currentValueMinor' in data) || (data.currentValueMinor is int && data.currentValueMinor >= 0 && data.currentValueMinor <= 100000000000)) &&
+             (!('investedAt' in data) || (data.investedAt is timestamp && data.investedAt <= request.time)) &&
+             (!('symbol' in data) || (data.symbol is string && data.symbol.size() <= 20)) &&
+             (!('units' in data) || (data.units is number && data.units >= 0));
+    }
+
+    function isValidBudgetRecord(data, docId) {
+      return isValidFinancialCore(data, docId) &&
+             data.periodKey is string && data.periodKey.matches('^20[0-9]{2}-(0[1-9]|1[0-2])$') &&
+             data.spentAmount is number && data.spentAmount >= 0 && data.spentAmount <= 1000000000 &&
+             (!('amountMinor' in data) || (data.amountMinor is int && data.amountMinor > 0 && data.amountMinor <= 100000000000)) &&
+             (!('spentAmountMinor' in data) || (data.spentAmountMinor is int && data.spentAmountMinor >= 0 && data.spentAmountMinor <= 100000000000)) &&
+             (!('budgetScope' in data) || data.budgetScope in ['MONTHLY_OVERALL', 'CATEGORY']) &&
+             (!('alertThresholdPercent' in data) || (data.alertThresholdPercent is int && data.alertThresholdPercent >= 10 && data.alertThresholdPercent <= 100));
+    }
+
+    function isValidFinancialEvent(data, docId) {
+      return data.eventId is string && data.eventId == docId && isValidId(data.eventId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.parentRecordId is string && isValidId(data.parentRecordId) &&
+             data.moduleType in ['LOANS', 'SAVINGS', 'INVESTMENTS', 'BUDGETS'] &&
+             data.eventType is string && data.eventType.size() >= 2 && data.eventType.size() <= 40 &&
+             data.actorUserId is string && isValidId(data.actorUserId) &&
+             data.amountMinor is int && data.amountMinor >= 0 && data.amountMinor <= 100000000000 &&
+             (!('secondaryAmountMinor' in data) || (data.secondaryAmountMinor is int && data.secondaryAmountMinor >= 0 && data.secondaryAmountMinor <= 100000000000)) &&
+             (!('balanceAfterMinor' in data) || (data.balanceAfterMinor is int && data.balanceAfterMinor >= 0 && data.balanceAfterMinor <= 100000000000)) &&
+             data.currency is string && data.currency.size() >= 3 && data.currency.size() <= 6 &&
+             (!('note' in data) || (data.note is string && data.note.size() <= 300)) &&
+             data.eventDate is timestamp && data.eventDate <= request.time &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidChatMessage(data, docId) {
+      return data.messageId is string && data.messageId == docId && isValidId(data.messageId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.senderUserId is string && isValidId(data.senderUserId) &&
+             data.senderDisplayName is string && data.senderDisplayName.size() >= 1 && data.senderDisplayName.size() <= 80 &&
+             (!('senderPhotoUrl' in data) || (data.senderPhotoUrl is string && data.senderPhotoUrl.size() <= 500)) &&
+             (!('senderRoleLabel' in data) || (data.senderRoleLabel is string && data.senderRoleLabel.size() <= 40)) &&
+             data.messageText is string && data.messageText.size() >= 1 && data.messageText.size() <= 1000 &&
+             data.messageType in ['TEXT', 'SYSTEM', 'RECORD_REF'] &&
+             data.recordStatus in ['ACTIVE', 'ARCHIVED', 'VOIDED'] &&
+             (!('relatedRecordId' in data) || isValidId(data.relatedRecordId)) &&
+             (!('readByUids' in data) || (data.readByUids is list && data.readByUids.size() <= 20)) &&
+             (!('editedAt' in data) || (data.editedAt is timestamp && data.editedAt <= request.time)) &&
+             (!('deletedAt' in data) || (data.deletedAt is timestamp && data.deletedAt <= request.time)) &&
+             (!('deletedByUserId' in data) || isValidId(data.deletedByUserId)) &&
+             (!('expiresAt' in data) || data.expiresAt is timestamp) &&
+             (!('syncVersion' in data) || (data.syncVersion is int && data.syncVersion >= 1)) &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidNotification(data, docId) {
+      return data.notificationId is string && data.notificationId == docId && isValidId(data.notificationId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.recipientUserId is string && data.recipientUserId.size() >= 1 && data.recipientUserId.size() <= 128 &&
+             data.createdByUserId is string && isValidId(data.createdByUserId) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             data.body is string && data.body.size() >= 1 && data.body.size() <= 400 &&
+             data.notificationType is string && data.notificationType.size() >= 2 && data.notificationType.size() <= 40 &&
+             data.acknowledged is bool &&
+             (!('readByUids' in data) || (data.readByUids is list && data.readByUids.size() <= 20)) &&
+             (!('deepLinkModule' in data) || (data.deepLinkModule is string && data.deepLinkModule.size() <= 40)) &&
+             data.recordStatus in ['ACTIVE', 'ARCHIVED'] &&
+             (!('relatedRecordId' in data) || isValidId(data.relatedRecordId)) &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidAuditLog(data, docId) {
+      return data.auditId is string && data.auditId == docId && isValidId(data.auditId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.actorUserId is string && isValidId(data.actorUserId) &&
+             data.entityCollection is string && data.entityCollection.size() >= 2 && data.entityCollection.size() <= 40 &&
+             data.entityId is string && isValidId(data.entityId) &&
+             data.action in ['CREATE', 'UPDATE', 'DELETE', 'ARCHIVE', 'STATUS_CHANGE', 'MEMBER_CHANGE', 'SYNC'] &&
+             data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 240 &&
+             (!('afterHash' in data) || (data.afterHash is string && data.afterHash.size() <= 128)) &&
+             (!('deviceId' in data) || (data.deviceId is string && data.deviceId.size() <= 128)) &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidCallSession(data, docId) {
+      return data.callId is string && data.callId == docId && isValidId(data.callId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.callerUid is string && isValidId(data.callerUid) &&
+             data.calleeUid is string && isValidId(data.calleeUid) &&
+             data.callerUid != data.calleeUid &&
+             data.callerName is string && data.callerName.size() >= 1 && data.callerName.size() <= 80 &&
+             data.calleeName is string && data.calleeName.size() >= 1 && data.calleeName.size() <= 80 &&
+             data.participantUids is list && data.participantUids.size() == 2 &&
+             data.participantUids.hasAll([data.callerUid, data.calleeUid]) &&
+             data.mediaType in ['AUDIO', 'VIDEO'] &&
+             data.status in ['RINGING', 'CONNECTING', 'ACTIVE', 'ENDED', 'REJECTED', 'MISSED', 'CANCELLED'] &&
+             (!('offerSdp' in data) || (data.offerSdp is string && data.offerSdp.size() <= 30000)) &&
+             (!('offerType' in data) || data.offerType in ['offer', 'pranswer', 'answer', 'rollback']) &&
+             (!('answerSdp' in data) || (data.answerSdp is string && data.answerSdp.size() <= 30000)) &&
+             (!('answerType' in data) || data.answerType in ['offer', 'pranswer', 'answer', 'rollback']) &&
+             (!('iceRestartCount' in data) || (data.iceRestartCount is int && data.iceRestartCount >= 0 && data.iceRestartCount <= 50)) &&
+             (!('networkQuality' in data) || data.networkQuality in ['UNKNOWN', 'EXCELLENT', 'GOOD', 'FAIR', 'POOR']) &&
+             (!('durationSeconds' in data) || (data.durationSeconds is int && data.durationSeconds >= 0 && data.durationSeconds <= 86400)) &&
+             (!('endedByUid' in data) || isValidId(data.endedByUid)) &&
+             (!('startedAt' in data) || (data.startedAt is timestamp && data.startedAt <= request.time)) &&
+             (!('endedAt' in data) || (data.endedAt is timestamp && data.endedAt <= request.time)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidIceCandidate(data, docId, callId) {
+      return data.candidateId is string && data.candidateId == docId && isValidId(data.candidateId) &&
+             data.callId is string && data.callId == callId &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.senderUid is string && isValidId(data.senderUid) &&
+             data.role in ['CALLER', 'CALLEE'] &&
+             (!('sdpMid' in data) || (data.sdpMid is string && data.sdpMid.size() <= 64)) &&
+             data.sdpMLineIndex is int && data.sdpMLineIndex >= 0 && data.sdpMLineIndex <= 32 &&
+             data.candidate is string && data.candidate.size() >= 1 && data.candidate.size() <= 2048 &&
+             data.participantUids is list && data.participantUids.size() == 2 &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    function isValidFamilyMeeting(data, docId) {
+      return data.meetingId is string && data.meetingId == docId && isValidId(data.meetingId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.roomName is string && data.roomName.size() >= 4 && data.roomName.size() <= 128 &&
+             data.title is string && data.title.size() >= 2 && data.title.size() <= 100 &&
+             data.hostUid is string && isValidId(data.hostUid) &&
+             data.hostName is string && data.hostName.size() >= 1 && data.hostName.size() <= 80 &&
+             data.inviteCode is string && data.inviteCode.size() >= 6 && data.inviteCode.size() <= 24 &&
+             data.inviteLink is string && data.inviteLink.size() >= 10 && data.inviteLink.size() <= 300 &&
+             data.status in ['SCHEDULED', 'LIVE', 'ENDED', 'CANCELLED'] &&
+             data.isScheduled is bool &&
+             (!('scheduledFor' in data) || data.scheduledFor is timestamp) &&
+             (!('startedAt' in data) || (data.startedAt is timestamp && data.startedAt <= request.time)) &&
+             (!('endedAt' in data) || (data.endedAt is timestamp && data.endedAt <= request.time)) &&
+             (!('endedByUid' in data) || isValidId(data.endedByUid)) &&
+             data.audioEnabledDefault is bool &&
+             data.videoEnabledDefault is bool &&
+             (!('invitedUids' in data) || (data.invitedUids is list && data.invitedUids.size() <= 20)) &&
+             (!('activeParticipantUids' in data) || (data.activeParticipantUids is list && data.activeParticipantUids.size() <= 20)) &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             (!('adminUids' in data) || (data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidMeetingParticipant(data, participantUid, meetingId) {
+      return data.participantUid is string && data.participantUid == participantUid && isValidId(participantUid) &&
+             data.meetingId is string && data.meetingId == meetingId &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             (!('roleLabel' in data) || (data.roleLabel is string && data.roleLabel.size() <= 40)) &&
+             data.isHost is bool &&
+             data.state in ['INVITED', 'JOINED', 'LEFT', 'REMOVED'] &&
+             data.audioEnabled is bool &&
+             data.videoEnabled is bool &&
+             data.screenSharing is bool &&
+             data.mutedByHost is bool &&
+             data.removedByHost is bool &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             (!('joinedAt' in data) || (data.joinedAt is timestamp && data.joinedAt <= request.time)) &&
+             (!('leftAt' in data) || (data.leftAt is timestamp && data.leftAt <= request.time)) &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // --- Validation Helpers ---
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId == request.auth.uid && data.userId.size() <= 128 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 120 &&
+             data.themePreference in ['SYSTEM', 'LIGHT', 'DARK'] &&
+             (!('phoneNumber' in data) || (data.phoneNumber is string && data.phoneNumber.matches('^\\+[1-9][0-9]{6,14}$'))) &&
+             (!('memberId' in data) || (data.memberId is string && data.memberId.size() >= 3 && data.memberId.size() <= 128)) &&
+             (!('maskedPhone' in data) || (data.maskedPhone is string && data.maskedPhone.size() <= 40)) &&
+             (!('dateOfBirth' in data) || (data.dateOfBirth is string && data.dateOfBirth.matches('^(19|20)[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'))) &&
+             (!('accountStatus' in data) || (data.accountStatus in ['ACTIVE', 'PENDING_VERIFICATION', 'LOCKED', 'SUSPENDED'])) &&
+             (!('passwordConfigured' in data) || data.passwordConfigured is bool) &&
+             (!('passkeyCount' in data) || (data.passkeyCount is int && data.passkeyCount >= 0 && data.passkeyCount <= 50)) &&
+             (!('newDeviceCheckEnabled' in data) || data.newDeviceCheckEnabled is bool) &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+             (!('activeFamilyId' in data) || isValidId(data.activeFamilyId)) &&
+             (!('registeredAt' in data) || (data.registeredAt is timestamp && data.registeredAt <= request.time)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidDeviceSession(data, userId, sessionId) {
+      return data.sessionId is string && data.sessionId == sessionId &&
+             data.userId is string && data.userId == userId &&
+             data.deviceId is string && data.deviceId.size() >= 4 && data.deviceId.size() <= 128 &&
+             data.deviceLabel is string && data.deviceLabel.size() >= 1 && data.deviceLabel.size() <= 80 &&
+             data.platform is string && data.platform.size() >= 1 && data.platform.size() <= 32 &&
+             data.authMethod in ['GOOGLE', 'PHONE_OTP', 'PHONE_PASSWORD', 'PASSKEY'] &&
+             data.isTrustedDevice is bool &&
+             data.revoked is bool &&
+             (!('revokedAt' in data) || (data.revokedAt is timestamp && data.revokedAt <= request.time)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.lastActiveAt is timestamp && data.lastActiveAt <= request.time;
+    }
+
+    function isValidFamily(data) {
+      return data.name is string && data.name.size() >= 2 && data.name.size() <= 60 &&
+             data.ownerId is string && isValidId(data.ownerId) &&
+             data.createdByUserId is string && isValidId(data.createdByUserId) &&
+             data.currencyCode is string && data.currencyCode.size() >= 3 && data.currencyCode.size() <= 6 &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20 &&
+             (data.ownerId in data.memberUids) &&
+             (data.ownerId in data.adminUids) &&
+             (!('suspendedUids' in data) || (data.suspendedUids is list && data.suspendedUids.size() <= 20)) &&
+             (!('isPersonal' in data) || data.isPersonal is bool) &&
+             data.requireAdminApproval is bool &&
+             data.memberChatEnabled is bool &&
+             data.membersCanAddExpenses is bool &&
+             data.budgetStartDay is int && data.budgetStartDay >= 1 && data.budgetStartDay <= 28 &&
+             (!('chatRetentionDays' in data) || (data.chatRetentionDays is int && data.chatRetentionDays >= 0 && data.chatRetentionDays <= 3650)) &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 200)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidFamilyMember(data, familyId) {
+      return data.userId is string && isValidId(data.userId) &&
+             data.familyId is string && data.familyId == familyId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             (!('memberId' in data) || (data.memberId is string && data.memberId.size() >= 3 && data.memberId.size() <= 128)) &&
+             (!('cardMemberId' in data) || (data.cardMemberId is string && data.cardMemberId.matches('^[A-Z0-9]{16}$'))) &&
+             (!('maskedPhone' in data) || (data.maskedPhone is string && data.maskedPhone.size() <= 40)) &&
+             (!('memberStatus' in data) || data.memberStatus in ['ACTIVE', 'SUSPENDED']) &&
+             data.role in ['ADMIN', 'MEMBER'] &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20 &&
+             (!('relationLabel' in data) || (data.relationLabel is string && data.relationLabel.size() <= 40)) &&
+             data.canCreateRecords is bool &&
+             data.canViewSharedFinances is bool &&
+             data.canParticipateInChat is bool &&
+             data.joinedAt is timestamp && data.joinedAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidMemberCard(data, familyId, targetUid) {
+      return data.userId is string && data.userId == targetUid && isValidId(targetUid) &&
+             data.familyId is string && data.familyId == familyId && isValidId(familyId) &&
+             data.cardMemberId is string && data.cardMemberId.matches('^[A-Z0-9]{16}$') &&
+             data.familyName is string && data.familyName.size() >= 1 && data.familyName.size() <= 60 &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500)) &&
+             data.role in ['ADMIN', 'MEMBER'] &&
+             data.memberStatus in ['ACTIVE', 'SUSPENDED'] &&
+             (!('memberUids' in data) || (data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20)) &&
+             (!('adminUids' in data) || (data.adminUids is list && data.adminUids.size() >= 1 && data.adminUids.size() <= 20)) &&
+             data.showAvailableBalance is bool &&
+             data.showIncomeAndExpense is bool &&
+             data.showFamilyContributions is bool &&
+             data.showLoans is bool &&
+             data.showSavings is bool &&
+             data.showInvestments is bool &&
+             data.showTransactionHistory is bool &&
+             data.allowAdminDetailedAudit is bool &&
+             !('phoneNumber' in data) &&
+             !('maskedPhone' in data) &&
+             !('dateOfBirth' in data) &&
+             !('password' in data) &&
+             !('passwordHash' in data) &&
+             !('passwordSalt' in data) &&
+             data.joinedAt is timestamp && data.joinedAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidInviteLookup(data, tokenHash) {
+      return data.tokenHash is string && data.tokenHash == tokenHash &&
+             data.tokenHash.matches('^[a-f0-9]{64}$') &&
+             data.invitationId is string && isValidId(data.invitationId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.familyName is string && data.familyName.size() >= 2 && data.familyName.size() <= 60 &&
+             data.createdByUid is string && isValidId(data.createdByUid) &&
+             data.targetRole in ['ADMIN', 'MEMBER'] &&
+             (!('inviteeHint' in data) || (data.inviteeHint is string && data.inviteeHint.size() <= 80)) &&
+             data.status in ['ACTIVE', 'REVOKED', 'USED'] &&
+             data.maxUses is int && data.maxUses >= 1 && data.maxUses <= 10 &&
+             data.usedCount is int && data.usedCount >= 0 && data.usedCount <= data.maxUses &&
+             data.expiresAt is timestamp &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidFamilyInvitation(data, familyId, invitationId) {
+      return data.invitationId is string && data.invitationId == invitationId &&
+             data.familyId is string && data.familyId == familyId &&
+             data.tokenHash is string && data.tokenHash.matches('^[a-f0-9]{64}$') &&
+             (!('token' in data) || (data.token is string && data.token.size() >= 12 && data.token.size() <= 64)) &&
+             data.tokenPreview is string && data.tokenPreview.size() >= 4 && data.tokenPreview.size() <= 40 &&
+             data.targetRole in ['ADMIN', 'MEMBER'] &&
+             (!('inviteeHint' in data) || (data.inviteeHint is string && data.inviteeHint.size() <= 80)) &&
+             data.status in ['ACTIVE', 'REVOKED', 'USED'] &&
+             data.maxUses is int && data.maxUses >= 1 && data.maxUses <= 10 &&
+             data.usedCount is int && data.usedCount >= 0 && data.usedCount <= data.maxUses &&
+             data.createdByUid is string && isValidId(data.createdByUid) &&
+             data.expiresAt is timestamp &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidJoinRequest(data, familyId, requesterUid) {
+      return data.userId is string && data.userId == requesterUid &&
+             data.familyId is string && data.familyId == familyId &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             (!('memberId' in data) || (data.memberId is string && data.memberId.size() >= 3 && data.memberId.size() <= 128)) &&
+             (!('maskedPhone' in data) || (data.maskedPhone is string && data.maskedPhone.size() <= 40)) &&
+             (!('authMethod' in data) || data.authMethod in ['INVITATION_TOKEN', 'FAMILY_PASSWORD']) &&
+             (!('contactSummary' in data) || (data.contactSummary is string && data.contactSummary.size() <= 120)) &&
+             (!('relationLabel' in data) || (data.relationLabel is string && data.relationLabel.size() <= 40)) &&
+             data.invitationId is string && isValidId(data.invitationId) &&
+             data.tokenHash is string && data.tokenHash.matches('^[a-f0-9]{64}$') &&
+             data.requestedRole in ['ADMIN', 'MEMBER'] &&
+             data.status in ['PENDING_APPROVAL', 'APPROVED', 'REJECTED'] &&
+             (!('reviewedByUid' in data) || isValidId(data.reviewedByUid)) &&
+             (!('reviewedAt' in data) || (data.reviewedAt is timestamp && data.reviewedAt <= request.time)) &&
+             data.requestedAt is timestamp && data.requestedAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // --- Collection Rules ---
+
+    // Server-only authentication, family secret passwords, and anti-abuse collections (Admin SDK only)
+    match /auth_credentials/{uid} {
+      allow read, write: if false;
+    }
+    match /phone_index/{phoneHash} {
+      allow read, write: if false;
+    }
+    match /auth_rate_limits/{limitKey} {
+      allow read, write: if false;
+    }
+    match /webauthn_challenges/{challengeId} {
+      allow read, write: if false;
+    }
+    match /family_secrets/{familyId} {
+      allow read, write: if false;
+    }
+    match /family_id_index/{familyId} {
+      allow read, write: if false;
+    }
+
+    // Non-listable invitation token lookup keyed by SHA-256(token)
+    match /family_invites/{tokenHash} {
+      allow get: if isSignedIn() && tokenHash.matches('^[a-f0-9]{64}$');
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidInviteLookup(incoming(), tokenHash) &&
+                       incoming().keys().hasAll([
+                         'tokenHash', 'invitationId', 'familyId', 'familyName',
+                         'createdByUid', 'targetRole', 'status', 'maxUses',
+                         'usedCount', 'expiresAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'tokenHash', 'invitationId', 'familyId', 'familyName',
+                         'createdByUid', 'targetRole', 'inviteeHint', 'status',
+                         'maxUses', 'usedCount', 'expiresAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().createdByUid == request.auth.uid &&
+                       incoming().status == 'ACTIVE' &&
+                       incoming().usedCount == 0 &&
+                       incoming().expiresAt > request.time &&
+                       isFamilyAdmin(incoming().familyId);
+
+      allow update: if isSignedIn() &&
+                       isValidInviteLookup(incoming(), tokenHash) &&
+                       isFamilyAdmin(existing().familyId) &&
+                       incoming().tokenHash == existing().tokenHash &&
+                       incoming().invitationId == existing().invitationId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdByUid == existing().createdByUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'usedCount', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isFamilyAdmin(existing().familyId);
+    }
+
+    // 1. User Profiles (PII isolated strictly to owning user; passwords/private keys forbidden)
+    match /users/{userId} {
+      allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'email', 'themePreference', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'displayName', 'email', 'phoneNumber', 'memberId', 'maskedPhone',
+                         'dateOfBirth', 'accountStatus', 'passwordConfigured', 'passkeyCount',
+                         'newDeviceCheckEnabled', 'photoUrl', 'activeFamilyId', 'themePreference',
+                         'registeredAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       (!('accountStatus' in incoming()) || incoming().accountStatus in ['ACTIVE', 'PENDING_VERIFICATION']) &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       request.auth.uid == userId &&
+                       isValidUserProfile(incoming()) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (!('registeredAt' in existing()) || incoming().registeredAt == existing().registeredAt) &&
+                       (!('accountStatus' in existing()) || !(existing().accountStatus in ['LOCKED', 'SUSPENDED']) || incoming().accountStatus == existing().accountStatus) &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'displayName', 'email', 'phoneNumber', 'memberId', 'maskedPhone', 'dateOfBirth',
+                         'photoUrl', 'activeFamilyId', 'themePreference', 'newDeviceCheckEnabled',
+                         'passkeyCount', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+
+      match /passkeys/{credentialId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if false;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /trusted_devices/{deviceId} {
+        allow read, write: if false;
+      }
+
+      match /membership_notices/{familyId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if false;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /sessions/{sessionId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(sessionId) &&
+                         request.auth.uid == userId &&
+                         incoming().keys().hasAll([
+                           'sessionId', 'userId', 'deviceId', 'deviceLabel', 'platform',
+                           'authMethod', 'isTrustedDevice', 'revoked', 'createdAt', 'lastActiveAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'sessionId', 'userId', 'deviceId', 'deviceLabel', 'platform',
+                           'authMethod', 'isTrustedDevice', 'revoked', 'revokedAt', 'createdAt', 'lastActiveAt'
+                         ]) &&
+                         incoming().revoked == false &&
+                         isValidDeviceSession(incoming(), userId, sessionId);
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(sessionId) &&
+                         request.auth.uid == userId &&
+                         isValidDeviceSession(incoming(), userId, sessionId) &&
+                         incoming().sessionId == existing().sessionId &&
+                         incoming().userId == existing().userId &&
+                         incoming().deviceId == existing().deviceId &&
+                         incoming().createdAt == existing().createdAt &&
+                         (!existing().revoked || incoming().revoked == true) &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['revoked', 'revokedAt', 'lastActiveAt', 'isTrustedDevice']);
+
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+
+      match /fcm_tokens/{deviceId} {
+        allow get, list: if isSignedIn() && request.auth.uid == userId;
+        allow create, update: if isSignedIn() &&
+                                 isValidId(userId) &&
+                                 isValidId(deviceId) &&
+                                 request.auth.uid == userId &&
+                                 incoming().keys().hasAll(['deviceId', 'token', 'platform', 'updatedAt']) &&
+                                 incoming().keys().hasOnly(['deviceId', 'token', 'platform', 'notificationsEnabled', 'updatedAt']) &&
+                                 incoming().deviceId == deviceId &&
+                                 incoming().token is string && incoming().token.size() >= 10 && incoming().token.size() <= 4096 &&
+                                 incoming().platform is string && incoming().platform.size() >= 1 && incoming().platform.size() <= 32 &&
+                                 (!('notificationsEnabled' in incoming()) || incoming().notificationsEnabled is bool) &&
+                                 incoming().updatedAt is timestamp && incoming().updatedAt <= request.time;
+        allow delete: if isSignedIn() && request.auth.uid == userId;
+      }
+    }
+
+    // 2. Families (Isolated per familyId; authorized members & Admin recovery only)
+    match /families/{familyId} {
+      allow get: if isSignedIn() &&
+                    isValidId(familyId) &&
+                    (
+                      !('suspendedUids' in existing()) ||
+                      !(request.auth.uid in existing().suspendedUids)
+                    ) &&
+                    (
+                      request.auth.uid in existing().memberUids ||
+                      request.auth.uid == existing().ownerId ||
+                      request.auth.uid == existing().createdByUserId
+                    );
+
+      allow list: if isSignedIn() &&
+                     (
+                       !('suspendedUids' in resource.data) ||
+                       !(request.auth.uid in resource.data.suspendedUids)
+                     ) &&
+                     (
+                       request.auth.uid in resource.data.memberUids ||
+                       request.auth.uid == resource.data.ownerId ||
+                       request.auth.uid == resource.data.createdByUserId
+                     );
+
+      allow create: if isSignedIn() &&
+                       isValidId(familyId) &&
+                       incoming().ownerId == request.auth.uid &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids.size() == 1 &&
+                       incoming().adminUids.size() == 1 &&
+                       request.auth.uid in incoming().memberUids &&
+                       request.auth.uid in incoming().adminUids &&
+                       (
+                         (incoming().get('isPersonal', false) == true && familyId == ('personal_' + request.auth.uid)) ||
+                         (incoming().get('isPersonal', false) == false && incoming().requireAdminApproval == true)
+                       ) &&
+                       incoming().keys().hasAll([
+                         'name', 'ownerId', 'createdByUserId', 'currencyCode',
+                         'memberUids', 'adminUids', 'requireAdminApproval',
+                         'memberChatEnabled', 'membersCanAddExpenses', 'budgetStartDay',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'name', 'ownerId', 'createdByUserId', 'currencyCode',
+                         'memberUids', 'adminUids', 'suspendedUids', 'isPersonal', 'description',
+                         'requireAdminApproval', 'memberChatEnabled',
+                         'membersCanAddExpenses', 'budgetStartDay', 'chatRetentionDays',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidFamily(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(familyId) &&
+                       isValidFamily(incoming()) &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         // Case A: Family Admin updates profile, settings, member list, or co-admins (cannot strip ownerId)
+                         (
+                           (request.auth.uid == existing().ownerId || request.auth.uid in existing().adminUids) &&
+                           incoming().ownerId == existing().ownerId &&
+                           existing().ownerId in incoming().memberUids &&
+                           existing().ownerId in incoming().adminUids &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'name', 'currencyCode', 'description',
+                             'memberUids', 'adminUids', 'suspendedUids',
+                             'requireAdminApproval', 'memberChatEnabled',
+                             'membersCanAddExpenses', 'budgetStartDay', 'chatRetentionDays',
+                             'updatedAt'
+                           ])
+                         ) ||
+                         // Case B: Primary Owner transfers Family Ownership to an active non-suspended member (single Admin kept)
+                         (
+                           request.auth.uid == existing().ownerId &&
+                           incoming().ownerId != existing().ownerId &&
+                           incoming().ownerId in existing().memberUids &&
+                           !('suspendedUids' in existing() && incoming().ownerId in existing().suspendedUids) &&
+                           exists(/databases/$(database)/documents/families/$(familyId)/members/$(incoming().ownerId)) &&
+                           incoming().ownerId in incoming().memberUids &&
+                           incoming().adminUids == [incoming().ownerId] &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['ownerId', 'adminUids', 'updatedAt'])
+                         ) ||
+                         // Case C: Non-owner member voluntarily leaves the family
+                         (
+                           request.auth.uid != existing().ownerId &&
+                           request.auth.uid in existing().memberUids &&
+                           !(request.auth.uid in incoming().memberUids) &&
+                           !(request.auth.uid in incoming().adminUids) &&
+                           incoming().memberUids.hasAll(existing().memberUids.removeAll([request.auth.uid])) &&
+                           existing().memberUids.hasAll(incoming().memberUids) &&
+                           incoming().adminUids.hasAll(existing().adminUids.removeAll([request.auth.uid])) &&
+                           existing().adminUids.hasAll(incoming().adminUids) &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['memberUids', 'adminUids', 'updatedAt'])
+                         )
+                       );
+
+      allow delete: if isSignedIn() &&
+                       isValidId(familyId) &&
+                       request.auth.uid == existing().ownerId;
+
+      // 3. Family Members subcollection
+      match /members/{memberId} {
+        allow get: if isSignedIn() &&
+                      isValidId(familyId) &&
+                      isValidId(memberId) &&
+                      request.auth.uid in existing().memberUids;
+
+        allow list: if isSignedIn() &&
+                       request.auth.uid in resource.data.memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(memberId) &&
+                         isValidFamilyMember(incoming(), familyId) &&
+                         incoming().userId == memberId &&
+                         incoming().keys().hasAll([
+                           'userId', 'familyId', 'displayName', 'role',
+                           'memberUids', 'adminUids', 'canCreateRecords',
+                           'canViewSharedFinances', 'canParticipateInChat',
+                           'joinedAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'familyId', 'displayName', 'memberId', 'cardMemberId',
+                           'maskedPhone', 'memberStatus', 'role',
+                           'memberUids', 'adminUids', 'relationLabel',
+                           'canCreateRecords', 'canViewSharedFinances',
+                           'canParticipateInChat', 'joinedAt', 'updatedAt'
+                         ]) &&
+                         existsAfter(/databases/$(database)/documents/families/$(familyId)) &&
+                         incoming().userId in getAfter(/databases/$(database)/documents/families/$(familyId)).data.memberUids &&
+                         (
+                           // Initial creator becomes ADMIN on atomic family creation
+                           (
+                             request.auth.uid == getAfter(/databases/$(database)/documents/families/$(familyId)).data.ownerId &&
+                             incoming().userId == request.auth.uid &&
+                             incoming().role == 'ADMIN'
+                           ) ||
+                           // Existing Family Admin approves/adds a member
+                           isFamilyAdminAfter(familyId)
+                         );
+
+        allow update: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(memberId) &&
+                         isValidFamilyMember(incoming(), familyId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().joinedAt == existing().joinedAt &&
+                         existsAfter(/databases/$(database)/documents/families/$(familyId)) &&
+                         (
+                           // Admin updates roles, permissions, or synced memberUids/adminUids
+                           (
+                             (
+                               isFamilyAdmin(familyId) ||
+                               request.auth.uid == get(/databases/$(database)/documents/families/$(familyId)).data.ownerId
+                             ) &&
+                             (
+                               existing().userId != getAfter(/databases/$(database)/documents/families/$(familyId)).data.ownerId ||
+                               incoming().role == 'ADMIN'
+                             ) &&
+                             incoming().diff(existing()).affectedKeys().hasOnly([
+                               'displayName', 'memberId', 'cardMemberId', 'maskedPhone',
+                               'memberStatus', 'role', 'relationLabel',
+                               'memberUids', 'adminUids',
+                               'canCreateRecords', 'canViewSharedFinances',
+                               'canParticipateInChat', 'updatedAt'
+                             ])
+                           ) ||
+                           // Self profile label edit or 16-char cardMemberId backfill (cannot touch role or permissions)
+                           (
+                             request.auth.uid == existing().userId &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'relationLabel', 'cardMemberId', 'updatedAt'])
+                           )
+                         );
+
+        allow delete: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(memberId) &&
+                         exists(/databases/$(database)/documents/families/$(familyId)) &&
+                         memberId != get(/databases/$(database)/documents/families/$(familyId)).data.ownerId &&
+                         (isFamilyAdmin(familyId) || request.auth.uid == memberId);
+      }
+
+      // 3b. Digital Member Cards & Configurable Financial Privacy (Prompt 14)
+      match /member_cards/{targetUid} {
+        allow get, list: if isSignedIn() &&
+                              isValidId(familyId) &&
+                              isFamilyMember(familyId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(targetUid) &&
+                         isFamilyMember(familyId) &&
+                         isValidMemberCard(incoming(), familyId, targetUid) &&
+                         targetUid in get(/databases/$(database)/documents/families/$(familyId)).data.memberUids &&
+                         (request.auth.uid == targetUid || isFamilyAdmin(familyId));
+
+        allow update: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(targetUid) &&
+                         isFamilyMember(familyId) &&
+                         isValidMemberCard(incoming(), familyId, targetUid) &&
+                         incoming().userId == existing().userId &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().cardMemberId == existing().cardMemberId &&
+                         incoming().joinedAt == existing().joinedAt &&
+                         (
+                           (
+                             request.auth.uid == targetUid &&
+                             incoming().role == existing().role &&
+                             incoming().memberStatus == existing().memberStatus &&
+                             incoming().diff(existing()).affectedKeys().hasOnly([
+                               'photoUrl',
+                               'showAvailableBalance', 'showIncomeAndExpense',
+                               'showFamilyContributions', 'showLoans', 'showSavings',
+                               'showInvestments', 'showTransactionHistory',
+                               'allowAdminDetailedAudit', 'updatedAt'
+                             ])
+                           ) ||
+                           (
+                             isFamilyAdmin(familyId) &&
+                             incoming().diff(existing()).affectedKeys().hasOnly([
+                               'familyName', 'displayName', 'photoUrl', 'role',
+                               'memberStatus', 'memberUids', 'adminUids', 'updatedAt'
+                             ])
+                           )
+                         );
+
+        allow delete: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isFamilyAdmin(familyId);
+      }
+
+      // 4. Family Invitations (Admin-only visibility & lifecycle)
+      match /invitations/{invitationId} {
+        allow get, list: if isValidId(familyId) && isFamilyAdmin(familyId);
+
+        allow create: if isValidId(familyId) &&
+                         isValidId(invitationId) &&
+                         isFamilyAdmin(familyId) &&
+                         isValidFamilyInvitation(incoming(), familyId, invitationId) &&
+                         incoming().keys().hasAll([
+                           'invitationId', 'familyId', 'tokenHash', 'tokenPreview',
+                           'targetRole', 'status', 'maxUses', 'usedCount',
+                           'createdByUid', 'expiresAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'invitationId', 'familyId', 'tokenHash', 'token',
+                           'tokenPreview', 'targetRole', 'inviteeHint', 'status',
+                           'maxUses', 'usedCount', 'createdByUid',
+                           'expiresAt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().createdByUid == request.auth.uid &&
+                         incoming().status == 'ACTIVE' &&
+                         incoming().usedCount == 0 &&
+                         incoming().expiresAt > request.time;
+
+        allow update: if isValidId(familyId) &&
+                         isValidId(invitationId) &&
+                         isFamilyAdmin(familyId) &&
+                         isValidFamilyInvitation(incoming(), familyId, invitationId) &&
+                         incoming().invitationId == existing().invitationId &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().tokenHash == existing().tokenHash &&
+                         incoming().createdByUid == existing().createdByUid &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'usedCount', 'token', 'updatedAt']);
+
+        allow delete: if isValidId(familyId) && isFamilyAdmin(familyId);
+      }
+
+      // 5. Pending Join Requests (Token-verified creation, Admin approval required)
+      match /join_requests/{requesterUid} {
+        allow get: if isSignedIn() &&
+                      isValidId(familyId) &&
+                      isValidId(requesterUid) &&
+                      (request.auth.uid == requesterUid || isFamilyAdmin(familyId));
+
+        allow list: if isValidId(familyId) && isFamilyAdmin(familyId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(requesterUid) &&
+                         request.auth.uid == requesterUid &&
+                         isValidJoinRequest(incoming(), familyId, requesterUid) &&
+                         incoming().keys().hasAll([
+                           'userId', 'familyId', 'displayName', 'invitationId',
+                           'tokenHash', 'requestedRole', 'status', 'requestedAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'familyId', 'displayName', 'contactSummary',
+                           'relationLabel', 'invitationId', 'tokenHash',
+                           'requestedRole', 'status', 'requestedAt', 'updatedAt'
+                         ]) &&
+                         incoming().status == 'PENDING_APPROVAL' &&
+                         exists(/databases/$(database)/documents/families/$(familyId)) &&
+                         !(request.auth.uid in get(/databases/$(database)/documents/families/$(familyId)).data.memberUids) &&
+                         exists(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)) &&
+                         get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.familyId == familyId &&
+                         get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.invitationId == incoming().invitationId &&
+                         get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.status == 'ACTIVE' &&
+                         get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.expiresAt > request.time &&
+                         get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.usedCount < get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.maxUses &&
+                         incoming().requestedRole == get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.targetRole;
+
+        allow update: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(requesterUid) &&
+                         isValidJoinRequest(incoming(), familyId, requesterUid) &&
+                         incoming().userId == existing().userId &&
+                         incoming().familyId == existing().familyId &&
+                         (
+                           // Family Admin approves or rejects a pending request
+                           (
+                             isFamilyAdmin(familyId) &&
+                             existing().status == 'PENDING_APPROVAL' &&
+                             incoming().status in ['APPROVED', 'REJECTED'] &&
+                             incoming().reviewedByUid == request.auth.uid &&
+                             incoming().requestedAt == existing().requestedAt &&
+                             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewedByUid', 'reviewedAt', 'updatedAt'])
+                           ) ||
+                           // Requester resubmits with a valid active token after previous rejection
+                           (
+                             request.auth.uid == requesterUid &&
+                             existing().status == 'REJECTED' &&
+                             incoming().status == 'PENDING_APPROVAL' &&
+                             exists(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)) &&
+                             get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.familyId == familyId &&
+                             get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.status == 'ACTIVE' &&
+                             get(/databases/$(database)/documents/family_invites/$(incoming().tokenHash)).data.expiresAt > request.time
+                           )
+                         );
+
+        allow delete: if isSignedIn() &&
+                         isValidId(familyId) &&
+                         isValidId(requesterUid) &&
+                         (request.auth.uid == requesterUid || isFamilyAdmin(familyId));
+      }
+
+      // 5e. Admin-Configurable Approval & Decision Rules (/families/{familyId}/approval_settings/{configId})
+      match /approval_settings/{configId} {
+        allow get, list: if isSignedIn() &&
+                          isValidId(familyId) &&
+                          isFamilyMember(familyId);
+
+        allow create, update: if isSignedIn() &&
+                                 isValidId(familyId) &&
+                                 configId == 'default' &&
+                                 isFamilyAdmin(familyId) &&
+                                 incoming().configId == configId &&
+                                 incoming().familyId == familyId &&
+                                 incoming().ruleMode in ['MAJORITY', 'UNANIMOUS', 'MIN_PERCENTAGE'] &&
+                                 incoming().minApprovalPercent is int &&
+                                 incoming().minApprovalPercent >= 1 &&
+                                 incoming().minApprovalPercent <= 100 &&
+                                 incoming().minQuorumCount is int &&
+                                 incoming().minQuorumCount >= 1 &&
+                                 incoming().minQuorumCount <= 20 &&
+                                 incoming().defaultDeadlineHours is int &&
+                                 incoming().defaultDeadlineHours >= 1 &&
+                                 incoming().defaultDeadlineHours <= 720 &&
+                                 incoming().allowCreatorVote is bool &&
+                                 incoming().allowVoteChangeBeforeDeadline is bool &&
+                                 incoming().eligibleVoterRule in ['ALL_ACTIVE_MEMBERS', 'RECORDS_AUTHORIZED_MEMBERS', 'ADMINS_ONLY', 'SPECIFIC_MEMBERS'] &&
+                                 (!('specificEligibleUids' in incoming()) || (incoming().specificEligibleUids is list && incoming().specificEligibleUids.size() <= 20)) &&
+                                 (!('requiredCategories' in incoming()) || (incoming().requiredCategories is list && incoming().requiredCategories.size() <= 10)) &&
+                                 (!('largeExpenseThresholdMinor' in incoming()) || (incoming().largeExpenseThresholdMinor is int && incoming().largeExpenseThresholdMinor >= 0)) &&
+                                 incoming().updatedByUid == request.auth.uid &&
+                                 incoming().updatedAt is timestamp &&
+                                 incoming().updatedAt <= request.time;
+
+        allow delete: if false;
+      }
+    }
+
+    // --- Normalized Top-Level Domain Collections (Isolated by familyId & memberUids) ---
+
+    // 6. Top-level Normalized Family Member Directory
+    match /familyMembers/{membershipId} {
+      allow get: if isSignedIn() &&
+                    isValidId(membershipId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(membershipId) &&
+                       isValidFamilyMember(incoming(), incoming().familyId) &&
+                       membershipId == (incoming().familyId + '_' + incoming().userId) &&
+                       (
+                         isFamilyAdminAfter(incoming().familyId) ||
+                         (
+                           existsAfter(/databases/$(database)/documents/families/$(incoming().familyId)) &&
+                           request.auth.uid == getAfter(/databases/$(database)/documents/families/$(incoming().familyId)).data.ownerId &&
+                           incoming().userId == request.auth.uid
+                         )
+                       );
+      allow update: if isSignedIn() &&
+                       isValidId(membershipId) &&
+                       isValidFamilyMember(incoming(), existing().familyId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().joinedAt == existing().joinedAt &&
+                       isFamilyAdmin(existing().familyId);
+      allow delete: if isSignedIn() &&
+                       isValidId(membershipId) &&
+                       (isFamilyAdmin(existing().familyId) || request.auth.uid == existing().userId);
+    }
+
+    // 7. Top-level Normalized Invitations Directory (Admin-only visibility & control)
+    match /invitations/{invitationId} {
+      allow get: if isSignedIn() &&
+                    isValidId(invitationId) &&
+                    isFamilyAdmin(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.adminUids;
+      allow create: if isSignedIn() &&
+                       isValidId(invitationId) &&
+                       isFamilyAdmin(incoming().familyId) &&
+                       isValidFamilyInvitation(incoming(), incoming().familyId, invitationId) &&
+                       incoming().adminUids is list &&
+                       request.auth.uid in incoming().adminUids &&
+                       incoming().createdByUid == request.auth.uid &&
+                       incoming().status == 'ACTIVE' &&
+                       incoming().usedCount == 0 &&
+                       incoming().expiresAt > request.time;
+      allow update: if isSignedIn() &&
+                       isValidId(invitationId) &&
+                       isFamilyAdmin(existing().familyId) &&
+                       isValidFamilyInvitation(incoming(), existing().familyId, invitationId) &&
+                       incoming().invitationId == existing().invitationId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().tokenHash == existing().tokenHash &&
+                       incoming().createdByUid == existing().createdByUid &&
+                       incoming().createdAt == existing().createdAt;
+      allow delete: if isSignedIn() &&
+                       isValidId(invitationId) &&
+                       isFamilyAdmin(existing().familyId);
+    }
+
+    // 8. Transactions (Income / Expense / Transfer) with duplicate prevention & personal/family isolation
+    match /transactions/{recordId} {
+      allow get: if isSignedIn() &&
+                    isValidId(recordId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isValidTransactionRecord(incoming(), recordId) &&
+                       canMemberCreateFinancialRecord(incoming().familyId) &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids);
+      allow update: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId)) &&
+                       isValidTransactionRecord(incoming(), recordId) &&
+                       incoming().recordId == existing().recordId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().idempotencyKey == existing().idempotencyKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       (incoming().memberUids == existing().memberUids || isFamilyAdmin(existing().familyId)) &&
+                       (!('adminUids' in existing()) || incoming().adminUids == existing().adminUids || isFamilyAdmin(existing().familyId)) &&
+                       (!(existing().idempotencyKey.matches('^proposal_exec_.*')) || (incoming().amountMinor == existing().amountMinor && incoming().amount == existing().amount));
+      allow delete: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 9. Loans (Borrowed / Lent)
+    match /loans/{recordId} {
+      allow get: if isSignedIn() &&
+                    isValidId(recordId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isValidLoanRecord(incoming(), recordId) &&
+                       canMemberCreateFinancialRecord(incoming().familyId) &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids);
+      allow update: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId)) &&
+                       isValidLoanRecord(incoming(), recordId) &&
+                       incoming().recordId == existing().recordId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().idempotencyKey == existing().idempotencyKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       (incoming().memberUids == existing().memberUids || isFamilyAdmin(existing().familyId)) &&
+                       (!('adminUids' in existing()) || incoming().adminUids == existing().adminUids || isFamilyAdmin(existing().familyId)) &&
+                       (!(existing().idempotencyKey.matches('^proposal_exec_.*')) || (incoming().amountMinor == existing().amountMinor && incoming().amount == existing().amount));
+      allow delete: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 10. Savings Goals
+    match /savings/{recordId} {
+      allow get: if isSignedIn() &&
+                    isValidId(recordId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isValidSavingsRecord(incoming(), recordId) &&
+                       canMemberCreateFinancialRecord(incoming().familyId) &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids);
+      allow update: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId)) &&
+                       isValidSavingsRecord(incoming(), recordId) &&
+                       incoming().recordId == existing().recordId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().idempotencyKey == existing().idempotencyKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       (incoming().memberUids == existing().memberUids || isFamilyAdmin(existing().familyId)) &&
+                       (!('adminUids' in existing()) || incoming().adminUids == existing().adminUids || isFamilyAdmin(existing().familyId));
+      allow delete: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 11. Investments
+    match /investments/{recordId} {
+      allow get: if isSignedIn() &&
+                    isValidId(recordId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isValidInvestmentRecord(incoming(), recordId) &&
+                       canMemberCreateFinancialRecord(incoming().familyId) &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids);
+      allow update: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId)) &&
+                       isValidInvestmentRecord(incoming(), recordId) &&
+                       incoming().recordId == existing().recordId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().idempotencyKey == existing().idempotencyKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       (incoming().memberUids == existing().memberUids || isFamilyAdmin(existing().familyId)) &&
+                       (!('adminUids' in existing()) || incoming().adminUids == existing().adminUids || isFamilyAdmin(existing().familyId)) &&
+                       (!(existing().idempotencyKey.matches('^proposal_exec_.*')) || (incoming().amountMinor == existing().amountMinor && incoming().amount == existing().amount));
+      allow delete: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 12. Budgets
+    match /budgets/{recordId} {
+      allow get: if isSignedIn() &&
+                    isValidId(recordId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isValidBudgetRecord(incoming(), recordId) &&
+                       canMemberCreateFinancialRecord(incoming().familyId) &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids);
+      allow update: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId)) &&
+                       isValidBudgetRecord(incoming(), recordId) &&
+                       incoming().recordId == existing().recordId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().idempotencyKey == existing().idempotencyKey &&
+                       incoming().createdAt == existing().createdAt &&
+                       (incoming().memberUids == existing().memberUids || isFamilyAdmin(existing().familyId)) &&
+                       (!('adminUids' in existing()) || incoming().adminUids == existing().adminUids || isFamilyAdmin(existing().familyId));
+      allow delete: if isSignedIn() &&
+                       isValidId(recordId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().createdByUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 13. Family Chat Messages
+    match /chats/{messageId} {
+      allow get: if isSignedIn() &&
+                    isValidId(messageId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(messageId) &&
+                       isValidChatMessage(incoming(), messageId) &&
+                       canMemberParticipateInChat(incoming().familyId) &&
+                       incoming().senderUserId == request.auth.uid &&
+                       incoming().memberUids == get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids;
+      allow update: if isSignedIn() &&
+                       isValidId(messageId) &&
+                       isFamilyMember(existing().familyId) &&
+                       isValidChatMessage(incoming(), messageId) &&
+                       incoming().messageId == existing().messageId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().senderUserId == existing().senderUserId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         // Any authorized family member marks message read by appending their UID
+                         (
+                           'readByUids' in incoming() &&
+                           request.auth.uid in incoming().readByUids &&
+                           (!('readByUids' in existing()) || incoming().readByUids.hasAll(existing().readByUids)) &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['readByUids', 'updatedAt'])
+                         ) ||
+                         // Original sender edits an active message
+                         (
+                           existing().senderUserId == request.auth.uid &&
+                           existing().recordStatus == 'ACTIVE' &&
+                           incoming().recordStatus == 'ACTIVE' &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['messageText', 'editedAt', 'syncVersion', 'updatedAt'])
+                         ) ||
+                         // Original sender or Family Admin soft-deletes/voids or archives the message
+                         (
+                           (existing().senderUserId == request.auth.uid || isFamilyAdmin(existing().familyId)) &&
+                           incoming().recordStatus in ['VOIDED', 'ARCHIVED'] &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['messageText', 'recordStatus', 'deletedAt', 'deletedByUserId', 'syncVersion', 'updatedAt'])
+                         )
+                       );
+      allow delete: if isSignedIn() &&
+                       isValidId(messageId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (existing().senderUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 14. Notifications
+    match /notifications/{notificationId} {
+      allow get: if isSignedIn() &&
+                    isValidId(notificationId) &&
+                    isFamilyMember(existing().familyId) &&
+                    (
+                      existing().recipientUserId == request.auth.uid ||
+                      existing().recipientUserId == 'ALL_MEMBERS' ||
+                      isFamilyAdmin(existing().familyId)
+                    );
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(notificationId) &&
+                       isValidNotification(incoming(), notificationId) &&
+                       isFamilyMember(incoming().familyId) &&
+                       incoming().createdByUserId == request.auth.uid &&
+                       incoming().memberUids == get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids;
+      allow update: if isSignedIn() &&
+                       isValidId(notificationId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (
+                         existing().recipientUserId == request.auth.uid ||
+                         existing().recipientUserId == 'ALL_MEMBERS' ||
+                         isFamilyAdmin(existing().familyId)
+                       ) &&
+                       isValidNotification(incoming(), notificationId) &&
+                       incoming().notificationId == existing().notificationId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().recipientUserId == existing().recipientUserId &&
+                       incoming().createdByUserId == existing().createdByUserId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['acknowledged', 'readByUids', 'recordStatus', 'updatedAt']);
+      allow delete: if isSignedIn() &&
+                       isValidId(notificationId) &&
+                       (existing().recipientUserId == request.auth.uid || isFamilyAdmin(existing().familyId));
+    }
+
+    // 15. Immutable Append-Only Audit Logs (Admin-scoped or actor-only read; private logs hidden from other members)
+    match /auditLogs/{auditId} {
+      allow get: if isSignedIn() &&
+                    isValidId(auditId) &&
+                    isFamilyMember(existing().familyId) &&
+                    (isFamilyAdmin(existing().familyId) || existing().actorUserId == request.auth.uid);
+      allow list: if isSignedIn() &&
+                     (
+                       request.auth.uid in resource.data.get('adminUids', []) ||
+                       resource.data.actorUserId == request.auth.uid
+                     );
+      allow create: if isSignedIn() &&
+                       isValidId(auditId) &&
+                       isValidAuditLog(incoming(), auditId) &&
+                       isFamilyMember(incoming().familyId) &&
+                       incoming().actorUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids) &&
+                       incoming().adminUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.adminUids);
+      allow update, delete: if false;
+    }
+
+    // 16. Append-Only Financial History Events (Loan repayments, Savings moves, Investment snapshots, Budget alerts)
+    match /financialEvents/{eventId} {
+      allow get: if isSignedIn() &&
+                    isValidId(eventId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(eventId) &&
+                       isValidFinancialEvent(incoming(), eventId) &&
+                       isFamilyMember(incoming().familyId) &&
+                       incoming().actorUserId == request.auth.uid &&
+                       incoming().memberUids == (isPersonalWorkspace(incoming().familyId) ? [request.auth.uid] : get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids);
+      allow update, delete: if false;
+    }
+
+    // 17. 1-to-1 WebRTC Calls & Trickle ICE Signaling
+    match /calls/{callId} {
+      allow get: if isSignedIn() &&
+                    isValidId(callId) &&
+                    request.auth.uid in existing().participantUids &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.participantUids;
+      allow create: if isSignedIn() &&
+                       isValidId(callId) &&
+                       isValidCallSession(incoming(), callId) &&
+                       isFamilyMember(incoming().familyId) &&
+                       incoming().callerUid == request.auth.uid &&
+                       incoming().calleeUid in get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids &&
+                       incoming().status == 'RINGING';
+      allow update: if isSignedIn() &&
+                       isValidId(callId) &&
+                       request.auth.uid in existing().participantUids &&
+                       isFamilyMember(existing().familyId) &&
+                       !(existing().status in ['ENDED', 'REJECTED', 'MISSED', 'CANCELLED']) &&
+                       isValidCallSession(incoming(), callId) &&
+                       incoming().callId == existing().callId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().callerUid == existing().callerUid &&
+                       incoming().calleeUid == existing().calleeUid &&
+                       incoming().participantUids == existing().participantUids &&
+                       incoming().mediaType == existing().mediaType &&
+                       incoming().createdAt == existing().createdAt;
+      allow delete: if isSignedIn() &&
+                       isValidId(callId) &&
+                       request.auth.uid in existing().participantUids &&
+                       (existing().callerUid == request.auth.uid || isFamilyAdmin(existing().familyId));
+
+      match /iceCandidates/{candidateId} {
+        allow get: if isSignedIn() &&
+                      isValidId(candidateId) &&
+                      exists(/databases/$(database)/documents/calls/$(callId)) &&
+                      request.auth.uid in get(/databases/$(database)/documents/calls/$(callId)).data.participantUids &&
+                      isFamilyMember(get(/databases/$(database)/documents/calls/$(callId)).data.familyId);
+        allow list: if isSignedIn() &&
+                       request.auth.uid in resource.data.participantUids;
+        allow create: if isSignedIn() &&
+                         isValidId(candidateId) &&
+                         isValidIceCandidate(incoming(), candidateId, callId) &&
+                         incoming().senderUid == request.auth.uid &&
+                         exists(/databases/$(database)/documents/calls/$(callId)) &&
+                         !(get(/databases/$(database)/documents/calls/$(callId)).data.status in ['ENDED', 'REJECTED', 'MISSED', 'CANCELLED']) &&
+                         request.auth.uid in get(/databases/$(database)/documents/calls/$(callId)).data.participantUids &&
+                         incoming().familyId == get(/databases/$(database)/documents/calls/$(callId)).data.familyId &&
+                         incoming().participantUids == get(/databases/$(database)/documents/calls/$(callId)).data.participantUids &&
+                         isFamilyMember(incoming().familyId);
+        allow update, delete: if false;
+      }
+    }
+
+    // 18. Group Family Meetings (LiveKit SFU Metadata & Participant Moderation)
+    match /meetings/{meetingId} {
+      allow get: if isSignedIn() &&
+                    isValidId(meetingId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+      allow create: if isSignedIn() &&
+                       isValidId(meetingId) &&
+                       isValidFamilyMeeting(incoming(), meetingId) &&
+                       isFamilyMember(incoming().familyId) &&
+                       incoming().hostUid == request.auth.uid &&
+                       incoming().status in ['SCHEDULED', 'LIVE'] &&
+                       incoming().memberUids == get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids;
+      allow update: if isSignedIn() &&
+                       isValidId(meetingId) &&
+                       isFamilyMember(existing().familyId) &&
+                       !(existing().status in ['ENDED', 'CANCELLED']) &&
+                       isValidFamilyMeeting(incoming(), meetingId) &&
+                       incoming().meetingId == existing().meetingId &&
+                       incoming().familyId == existing().familyId &&
+                       incoming().roomName == existing().roomName &&
+                       incoming().hostUid == existing().hostUid &&
+                       incoming().inviteCode == existing().inviteCode &&
+                       incoming().inviteLink == existing().inviteLink &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         (
+                           existing().hostUid == request.auth.uid ||
+                           isFamilyAdmin(existing().familyId)
+                         ) ||
+                         (
+                           incoming().status == existing().status &&
+                           incoming().diff(existing()).affectedKeys().hasOnly(['activeParticipantUids', 'updatedAt'])
+                         )
+                       );
+      allow delete: if isSignedIn() &&
+                       isValidId(meetingId) &&
+                       (existing().hostUid == request.auth.uid || isFamilyAdmin(existing().familyId));
+
+      match /participants/{participantUid} {
+        allow get: if isSignedIn() &&
+                      isValidId(participantUid) &&
+                      exists(/databases/$(database)/documents/meetings/$(meetingId)) &&
+                      isFamilyMember(get(/databases/$(database)/documents/meetings/$(meetingId)).data.familyId);
+        allow list: if isSignedIn() &&
+                       request.auth.uid in resource.data.memberUids;
+        allow create: if isSignedIn() &&
+                         isValidId(participantUid) &&
+                         isValidMeetingParticipant(incoming(), participantUid, meetingId) &&
+                         exists(/databases/$(database)/documents/meetings/$(meetingId)) &&
+                         !(get(/databases/$(database)/documents/meetings/$(meetingId)).data.status in ['ENDED', 'CANCELLED']) &&
+                         incoming().familyId == get(/databases/$(database)/documents/meetings/$(meetingId)).data.familyId &&
+                         incoming().memberUids == get(/databases/$(database)/documents/meetings/$(meetingId)).data.memberUids &&
+                         isFamilyMember(incoming().familyId) &&
+                         (
+                           (
+                             participantUid == request.auth.uid &&
+                             incoming().mutedByHost == false &&
+                             incoming().removedByHost == false
+                           ) ||
+                           get(/databases/$(database)/documents/meetings/$(meetingId)).data.hostUid == request.auth.uid ||
+                           isFamilyAdmin(incoming().familyId)
+                         );
+        allow update: if isSignedIn() &&
+                         isValidId(participantUid) &&
+                         isValidMeetingParticipant(incoming(), participantUid, meetingId) &&
+                         incoming().participantUid == existing().participantUid &&
+                         incoming().meetingId == existing().meetingId &&
+                         incoming().familyId == existing().familyId &&
+                         isFamilyMember(existing().familyId) &&
+                         !(get(/databases/$(database)/documents/meetings/$(meetingId)).data.status in ['ENDED', 'CANCELLED']) &&
+                         (
+                           get(/databases/$(database)/documents/meetings/$(meetingId)).data.hostUid == request.auth.uid ||
+                           isFamilyAdmin(existing().familyId) ||
+                           (
+                             participantUid == request.auth.uid &&
+                             existing().removedByHost == false &&
+                             incoming().removedByHost == existing().removedByHost &&
+                             incoming().mutedByHost == existing().mutedByHost &&
+                             (!existing().mutedByHost || incoming().audioEnabled == false)
+                           )
+                         );
+        allow delete: if isSignedIn() &&
+                         exists(/databases/$(database)/documents/meetings/$(meetingId)) &&
+                         (
+                           get(/databases/$(database)/documents/meetings/$(meetingId)).data.hostUid == request.auth.uid ||
+                           isFamilyAdmin(existing().familyId)
+                         );
+      }
+    }
+
+    // --- 17. Family Approval & Financial Decision Proposals (/proposals/{proposalId}) ---
+    function isValidApprovalSettingsProposalDoc(data, docId) {
+      return data.proposalId is string && data.proposalId == docId && isValidId(data.proposalId) &&
+             data.familyId is string && isValidId(data.familyId) &&
+             data.title is string && data.title.size() >= 2 && data.title.size() <= 120 &&
+             data.category in ['TAKE_LOAN', 'GIVE_LOAN', 'MAKE_INVESTMENT', 'WITHDRAW_SAVINGS', 'LARGE_EXPENSE', 'LARGE_PURCHASE', 'OTHER_CONFIGURABLE'] &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 800)) &&
+             (!('reason' in data) || (data.reason is string && data.reason.size() <= 500)) &&
+             data.amountMinor is int && data.amountMinor > 0 && data.amountMinor <= 100000000000 &&
+             data.currency is string && data.currency.size() >= 3 && data.currency.size() <= 6 &&
+             data.proposedDate is timestamp &&
+             data.votingDeadline is timestamp &&
+             data.votingDeadline > data.proposedDate &&
+             data.proposerUid is string && isValidId(data.proposerUid) &&
+             data.status in ['DRAFT', 'PENDING', 'APPROVED', 'REJECTED', 'EXPIRED', 'CANCELLED', 'EXECUTED'] &&
+             data.ruleMode in ['MAJORITY', 'UNANIMOUS', 'MIN_PERCENTAGE'] &&
+             data.minApprovalPercent is int && data.minApprovalPercent >= 1 && data.minApprovalPercent <= 100 &&
+             data.minQuorumRequired is int && data.minQuorumRequired >= 1 && data.minQuorumRequired <= 20 &&
+             data.allowCreatorVote is bool &&
+             data.allowVoteChangeBeforeDeadline is bool &&
+             data.eligibleVoterUids is list && data.eligibleVoterUids.size() <= 20 &&
+             data.approvedCount is int && data.approvedCount >= 0 &&
+             data.rejectedCount is int && data.rejectedCount >= 0 &&
+             (data.approvedCount + data.rejectedCount) <= data.eligibleVoterUids.size() &&
+             data.memberUids is list && data.memberUids.size() >= 1 && data.memberUids.size() <= 20 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function canApproveProposalWithCurrentTally(data) {
+      return data.approvedCount >= data.minQuorumRequired &&
+             (data.approvedCount + data.rejectedCount) >= data.minQuorumRequired &&
+             (
+               (data.ruleMode == 'UNANIMOUS' &&
+                 data.rejectedCount == 0 &&
+                 data.approvedCount == data.eligibleVoterUids.size()) ||
+               (data.ruleMode == 'MAJORITY' &&
+                 data.approvedCount * 2 > data.eligibleVoterUids.size()) ||
+               (data.ruleMode == 'MIN_PERCENTAGE' &&
+                 data.approvedCount * 100 >= data.eligibleVoterUids.size() * data.minApprovalPercent)
+             );
+    }
+
+    function proposalTermsLocked() {
+      return request.resource.data.diff(resource.data).unchangedKeys().hasAll([
+        'proposalId', 'familyId', 'proposerUid', 'createdAt', 'category',
+        'amountMinor', 'currency', 'proposedDate', 'votingDeadline',
+        'eligibleVoterUids', 'ruleMode', 'minApprovalPercent',
+        'minQuorumRequired', 'allowCreatorVote', 'allowVoteChangeBeforeDeadline'
+      ]);
+    }
+
+    match /proposals/{proposalId} {
+      allow get: if isSignedIn() &&
+                    isValidId(proposalId) &&
+                    isFamilyMember(existing().familyId);
+      allow list: if isSignedIn() &&
+                     request.auth.uid in resource.data.memberUids;
+
+      allow create: if isSignedIn() &&
+                       isValidId(proposalId) &&
+                       isValidApprovalSettingsProposalDoc(incoming(), proposalId) &&
+                       canMemberCreateFinancialRecord(incoming().familyId) &&
+                       incoming().proposerUid == request.auth.uid &&
+                       incoming().status in ['DRAFT', 'PENDING'] &&
+                       (incoming().status == 'DRAFT' || incoming().eligibleVoterUids.size() >= 1) &&
+                       incoming().approvedCount == 0 &&
+                       incoming().rejectedCount == 0 &&
+                       (!('executedRecordId' in incoming()) || incoming().executedRecordId == null) &&
+                       (!('executedAt' in incoming()) || incoming().executedAt == null) &&
+                       incoming().memberUids == get(/databases/$(database)/documents/families/$(incoming().familyId)).data.memberUids;
+
+      allow update: if isSignedIn() &&
+                       isValidId(proposalId) &&
+                       existing().status in ['DRAFT', 'PENDING', 'APPROVED'] &&
+                       isValidApprovalSettingsProposalDoc(incoming(), proposalId) &&
+                       isFamilyMember(existing().familyId) &&
+                       (
+                         // Case 1: Proposer edits or submits a DRAFT proposal
+                         (
+                           existing().status == 'DRAFT' &&
+                           existing().proposerUid == request.auth.uid &&
+                           request.resource.data.diff(resource.data).unchangedKeys().hasAll([
+                             'proposalId', 'familyId', 'proposerUid', 'createdAt'
+                           ]) &&
+                           incoming().status in ['DRAFT', 'PENDING'] &&
+                           (incoming().status == 'DRAFT' || incoming().eligibleVoterUids.size() >= 1) &&
+                           incoming().approvedCount == 0 &&
+                           incoming().rejectedCount == 0 &&
+                           (!('executedRecordId' in incoming()) || incoming().executedRecordId == null)
+                         ) ||
+                         // Cases 2–5 lock all immutable proposal terms and voting rules
+                         (
+                           proposalTermsLocked() &&
+                           (
+                             // Case 2: Eligible voter casts/changes a vote on a PENDING proposal (anti-tamper +/-1 delta & tally verification)
+                             (
+                               existing().status == 'PENDING' &&
+                               request.time <= existing().votingDeadline &&
+                               request.auth.uid in existing().eligibleVoterUids &&
+                               (existing().allowCreatorVote == true || request.auth.uid != existing().proposerUid) &&
+                               existsAfter(/databases/$(database)/documents/proposals/$(proposalId)/votes/$(request.auth.uid)) &&
+                               incoming().approvedCount >= existing().approvedCount - 1 &&
+                               incoming().approvedCount <= existing().approvedCount + 1 &&
+                               incoming().rejectedCount >= existing().rejectedCount - 1 &&
+                               incoming().rejectedCount <= existing().rejectedCount + 1 &&
+                               (incoming().approvedCount + incoming().rejectedCount) >= (existing().approvedCount + existing().rejectedCount) &&
+                               (incoming().approvedCount + incoming().rejectedCount) <= (existing().approvedCount + existing().rejectedCount + 1) &&
+                               incoming().status in ['PENDING', 'APPROVED', 'REJECTED'] &&
+                               (incoming().status != 'APPROVED' || canApproveProposalWithCurrentTally(incoming())) &&
+                               (!('executedRecordId' in incoming()) || incoming().executedRecordId == null)
+                             ) ||
+                             // Case 3: Expire past-deadline PENDING proposal
+                             (
+                               existing().status == 'PENDING' &&
+                               request.time > existing().votingDeadline &&
+                               incoming().status == 'EXPIRED' &&
+                               incoming().approvedCount == existing().approvedCount &&
+                               incoming().rejectedCount == existing().rejectedCount &&
+                               (!('executedRecordId' in incoming()) || incoming().executedRecordId == null)
+                             ) ||
+                             // Case 4: Family Admin cancels a DRAFT/PENDING proposal with mandatory reason (never overrides votes into APPROVED)
+                             (
+                               existing().status in ['DRAFT', 'PENDING'] &&
+                               isFamilyAdmin(existing().familyId) &&
+                               incoming().status == 'CANCELLED' &&
+                               incoming().cancelledByUid == request.auth.uid &&
+                               incoming().cancelReason is string &&
+                               incoming().cancelReason.size() >= 5 &&
+                               incoming().approvedCount == existing().approvedCount &&
+                               incoming().rejectedCount == existing().rejectedCount
+                             ) ||
+                             // Case 5: Exact-once atomic execution strictly from APPROVED -> EXECUTED
+                             (
+                               existing().status == 'APPROVED' &&
+                               incoming().status == 'EXECUTED' &&
+                               incoming().approvedCount == existing().approvedCount &&
+                               incoming().rejectedCount == existing().rejectedCount &&
+                               incoming().executedByUid == request.auth.uid &&
+                               incoming().executedRecordId is string &&
+                               isValidId(incoming().executedRecordId) &&
+                               incoming().executedCollection in ['transactions', 'loans', 'savings', 'investments'] &&
+                               incoming().executedAt is timestamp &&
+                               incoming().executedAt <= request.time &&
+                               (
+                                 isFamilyAdmin(existing().familyId) ||
+                                 get(/databases/$(database)/documents/families/$(existing().familyId)).data.membersCanAddExpenses == true
+                               )
+                             )
+                           )
+                         )
+                       );
+
+      allow delete: if isSignedIn() &&
+                       existing().proposerUid == request.auth.uid &&
+                       existing().status == 'DRAFT';
+
+      match /votes/{voterUid} {
+        allow get, list: if isSignedIn() &&
+                          exists(/databases/$(database)/documents/proposals/$(proposalId)) &&
+                          request.auth.uid in get(/databases/$(database)/documents/proposals/$(proposalId)).data.memberUids;
+
+        allow create: if isSignedIn() &&
+                         voterUid == request.auth.uid &&
+                         exists(/databases/$(database)/documents/proposals/$(proposalId)) &&
+                         incoming().voterUid == voterUid &&
+                         incoming().proposalId == proposalId &&
+                         incoming().choice in ['APPROVE', 'REJECT'] &&
+                         isFamilyMember(get(/databases/$(database)/documents/proposals/$(proposalId)).data.familyId) &&
+                         get(/databases/$(database)/documents/proposals/$(proposalId)).data.status == 'PENDING' &&
+                         request.time <= get(/databases/$(database)/documents/proposals/$(proposalId)).data.votingDeadline &&
+                         voterUid in get(/databases/$(database)/documents/proposals/$(proposalId)).data.eligibleVoterUids &&
+                         (get(/databases/$(database)/documents/proposals/$(proposalId)).data.allowCreatorVote == true ||
+                           voterUid != get(/databases/$(database)/documents/proposals/$(proposalId)).data.proposerUid);
+
+        allow update: if isSignedIn() &&
+                         voterUid == request.auth.uid &&
+                         exists(/databases/$(database)/documents/proposals/$(proposalId)) &&
+                         incoming().voterUid == existing().voterUid &&
+                         incoming().proposalId == existing().proposalId &&
+                         incoming().familyId == existing().familyId &&
+                         incoming().choice in ['APPROVE', 'REJECT'] &&
+                         get(/databases/$(database)/documents/proposals/$(proposalId)).data.status == 'PENDING' &&
+                         request.time <= get(/databases/$(database)/documents/proposals/$(proposalId)).data.votingDeadline &&
+                         get(/databases/$(database)/documents/proposals/$(proposalId)).data.allowVoteChangeBeforeDeadline == true;
+
+        allow delete: if false;
+      }
+
+      match /vote_history/{historyId} {
+        allow get, list: if isSignedIn() &&
+                          exists(/databases/$(database)/documents/proposals/$(proposalId)) &&
+                          request.auth.uid in get(/databases/$(database)/documents/proposals/$(proposalId)).data.memberUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(historyId) &&
+                         exists(/databases/$(database)/documents/proposals/$(proposalId)) &&
+                         incoming().historyId == historyId &&
+                         incoming().proposalId == proposalId &&
+                         incoming().actorUid == request.auth.uid &&
+                         isFamilyMember(get(/databases/$(database)/documents/proposals/$(proposalId)).data.familyId);
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}
