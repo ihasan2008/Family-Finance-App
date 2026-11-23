@@ -3,6 +3,9 @@
   <img src="app/src/main/res/drawable/img_family_growth_banner.jpg" alt="Family Finance Banner" width="100%">
 
   <br>
+  <hr>
+  <br>
+  <br>
 
   <img src="app/src/main/res/drawable/img_family_finance_logo.png" alt="Family Finance App Icon" width="110">
 
